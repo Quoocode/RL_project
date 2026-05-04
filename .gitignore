@@ -1,0 +1,60 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyd
+*.so
+*.egg-info/
+.build/
+dist/
+build/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# Python tooling
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Environment variables
+.env
+.env.*
+
+# Logs and training outputs
+logs/
+models/
+results/
+*.log
+*.out
+*.err
+
+# TensorBoard / checkpoints
+tensorboard/
+checkpoints/
+*.tfevents.*
+
+# Kubernetes / local config secrets
+k3s_setup/config_auto.yaml
+
+# Temporary files
+*.tmp
+*.temp
