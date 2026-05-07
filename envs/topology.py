@@ -103,22 +103,21 @@ class NetworkTopology:
         self._initialize_latency_matrix()
     
     def _initialize_nodes(self, config: Dict = None):
-        """Khởi tạo các nodes trong cluster."""
-        default_config = {
-            'cpu_capacity': 8,      # 8 cores
-            'memory_capacity': 16,  # 16 GB
-            'bandwidth': 1000       # 1 Gbps
-        }
-        config = config or default_config
-        
-        for i in range(self.num_nodes):
-            node = Node(
+        node_types = [
+            {'cpu': 2,  'memory': 4,  'bandwidth': 500},
+            {'cpu': 4,  'memory': 8,  'bandwidth': 1000},
+            {'cpu': 8,  'memory': 16, 'bandwidth': 2000},
+        ]
+        weights = [0.4, 0.4, 0.2]
+        chosen = np.random.choice(len(node_types), size=self.num_nodes, p=weights)
+        for i, t_idx in enumerate(chosen):
+            t = node_types[t_idx]
+            self.nodes.append(Node(
                 id=i,
-                cpu_capacity=config.get('cpu_capacity', 8),
-                memory_capacity=config.get('memory_capacity', 16),
-                bandwidth=config.get('bandwidth', 1000)
-            )
-            self.nodes.append(node)
+                cpu_capacity=t['cpu'],
+                memory_capacity=t['memory'],
+                bandwidth=t['bandwidth'],
+            ))
     
     def _initialize_latency_matrix(self):
         """Khởi tạo ma trận độ trễ ngẫu nhiên giữa các nodes (từ 1-10 ms)."""
@@ -148,23 +147,15 @@ def create_sample_topology(num_nodes: int = 5) -> NetworkTopology:
     return NetworkTopology(num_nodes, config)
 
 def create_sample_service_chain(num_services: int = 5) -> ServiceChain:
-    np.random.seed(42) 
+    # Bỏ np.random.seed(42) — tăng range CPU/RAM
     services = []
-    
     for i in range(num_services):
-        # Tạo ngẫu nhiên CPU (0.1 - 0.8) và RAM (0.5 - 1.5) cho từng service
-        # Nhỏ gọn để 30 cái vẫn có cơ hội nhét vừa 5 Node
-        cpu_req = round(np.random.uniform(0.1, 0.8), 2)
-        mem_req = round(np.random.uniform(0.5, 1.5), 2)
-        
+        cpu_req = round(np.random.uniform(0.5, 2.0), 2)
+        mem_req = round(np.random.uniform(1.0, 4.0), 2)
         services.append(Microservice(i, f"service-{i}", cpu_req, mem_req))
-    
     chain = ServiceChain(0, services)
-    
-    # Thêm yêu cầu độ trễ (latency) cho các service nối tiếp nhau
     for i in range(num_services - 1):
         chain.add_latency_requirement(i, i + 1, 5.0)
-        
     return chain
 
 if __name__ == "__main__":
