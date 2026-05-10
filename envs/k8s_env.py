@@ -41,7 +41,7 @@ class K8sPlacementEnv(gym.Env):
 
         # Hạ tầng mạng và chuỗi service — tạo một lần, reset() sẽ làm sạch
         self.topology = create_sample_topology(num_nodes)
-        self.service_chain = create_sample_service_chain(num_services)
+        self.service_chain = create_sample_service_chain(num_services, seed = 0)
 
         # Bộ đếm nội bộ
         self.current_service_idx: int = 0
@@ -49,7 +49,7 @@ class K8sPlacementEnv(gym.Env):
 
         # Action / Observation space
         self.action_space = spaces.Discrete(num_nodes)
-        obs_dim = (num_nodes * 2) + num_services
+        obs_dim = (num_nodes * 2) + 2 + num_services
         self.observation_space = spaces.Box(
             low=0.0, high=1.0, shape=(obs_dim,), dtype=np.float32
         )
@@ -66,6 +66,14 @@ class K8sPlacementEnv(gym.Env):
             else:
                 obs.append(node.cpu_used    / node.cpu_capacity)
                 obs.append(node.memory_used / node.memory_capacity)
+        # THÊM MỚI: resource request của service hiện tại (normalized)
+        # Agent cần biết service này nặng hay nhẹ để chọn node phù hợp
+        if self.current_service_idx < self.num_services:
+            svc = self.service_chain.services[self.current_service_idx]
+            obs.append(svc.cpu_request / 2.0)      # normalize về [0,1] với max=2.0
+            obs.append(svc.memory_request / 4.0)   # normalize về [0,1] với max=4.0
+        else:
+            obs.extend([0.0, 0.0])
 
         service_onehot = np.zeros(self.num_services, dtype=np.float32)
         if self.current_service_idx < self.num_services:
@@ -160,8 +168,10 @@ class K8sPlacementEnv(gym.Env):
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
         self.topology.reset()
-        for svc in self.service_chain.services:
-            svc.placed_on = -1
+        # Tạo service chain mới mỗi episode với seed khác nhau
+        self.service_chain = create_sample_service_chain(
+            self.num_services, seed=seed
+        )
         self.current_service_idx = 0
         self.step_count = 0
         return self._get_observation(), {}

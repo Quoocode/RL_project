@@ -101,23 +101,32 @@ class NetworkTopology:
         
         self._initialize_nodes(config)
         self._initialize_latency_matrix()
-    
+
     def _initialize_nodes(self, config: Dict = None):
-        node_types = [
-            {'cpu': 2,  'memory': 4,  'bandwidth': 500},
-            {'cpu': 4,  'memory': 8,  'bandwidth': 1000},
-            {'cpu': 8,  'memory': 16, 'bandwidth': 2000},
-        ]
-        weights = [0.4, 0.4, 0.2]
-        chosen = np.random.choice(len(node_types), size=self.num_nodes, p=weights)
-        for i, t_idx in enumerate(chosen):
-            t = node_types[t_idx]
+        for i in range(self.num_nodes):
             self.nodes.append(Node(
                 id=i,
-                cpu_capacity=t['cpu'],
-                memory_capacity=t['memory'],
-                bandwidth=t['bandwidth'],
+                cpu_capacity=4,
+                memory_capacity=8,
+                bandwidth=1000,
             ))
+    
+    # def _initialize_nodes(self, config: Dict = None):
+    #     node_types = [
+    #         {'cpu': 2,  'memory': 4,  'bandwidth': 500},
+    #         {'cpu': 4,  'memory': 8,  'bandwidth': 1000},
+    #         {'cpu': 8,  'memory': 16, 'bandwidth': 2000},
+    #     ]
+    #     weights = [0.4, 0.4, 0.2]
+    #     chosen = np.random.choice(len(node_types), size=self.num_nodes, p=weights)
+    #     for i, t_idx in enumerate(chosen):
+    #         t = node_types[t_idx]
+    #         self.nodes.append(Node(
+    #             id=i,
+    #             cpu_capacity=t['cpu'],
+    #             memory_capacity=t['memory'],
+    #             bandwidth=t['bandwidth'],
+    #         ))
     
     def _initialize_latency_matrix(self):
         """Khởi tạo ma trận độ trễ ngẫu nhiên giữa các nodes (từ 1-10 ms)."""
@@ -146,8 +155,9 @@ def create_sample_topology(num_nodes: int = 5) -> NetworkTopology:
     config = {'cpu_capacity': 8, 'memory_capacity': 16, 'bandwidth': 1000}
     return NetworkTopology(num_nodes, config)
 
-def create_sample_service_chain(num_services: int = 5) -> ServiceChain:
-    # Bỏ np.random.seed(42) — tăng range CPU/RAM
+def create_sample_service_chain(num_services: int = 5, seed=None) -> ServiceChain:
+    if seed is not None:
+        np.random.seed(seed)
     services = []
     for i in range(num_services):
         cpu_req = round(np.random.uniform(0.5, 2.0), 2)
