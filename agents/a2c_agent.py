@@ -35,8 +35,8 @@ class A2CAgent:
         self.model = A2C(
             policy          = "MlpPolicy",
             env             = env,
-            learning_rate   = 7e-4,
-            n_steps         = 5,        # A2C update sau mỗi 5 steps (khác PPO 2048)
+            learning_rate   = 5e-4,
+            n_steps         = 20,       # A2C update sau mỗi 20 steps (khác PPO 2048)
             gamma           = 0.99,
             gae_lambda      = 1.0,      # A2C dùng full return thay vì GAE
             ent_coef        = 0.0,

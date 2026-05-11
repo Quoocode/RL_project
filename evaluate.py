@@ -81,16 +81,33 @@ def run_first_fit(num_nodes, num_services, n_episodes, seed) -> dict:
             ]
             nodes = env.unwrapped.topology.nodes
 
-            # Tìm node đầu tiên có đủ tài nguyên
+            # First-Fit (improved): chọn node đầu tiên mà sau khi đặt
+            # expected utilization không vượt quá 0.8 (tránh phạt nặng).
+            # Nếu không tìm thấy, fallback: chọn node có đủ tài nguyên.
+            # Nếu vẫn không có, chọn node active có utilization thấp nhất.
             action = None
+            # 1) Prefer nodes that keep post-allocation util <= 0.8
             for i, node in enumerate(nodes):
-                if node.is_active and node.can_allocate(
-                    service.cpu_request, service.memory_request
-                ):
+                if not node.is_active:
+                    continue
+                if not node.can_allocate(service.cpu_request, service.memory_request):
+                    continue
+                exp_cpu_util = (node.cpu_used + service.cpu_request) / node.cpu_capacity
+                exp_mem_util = (node.memory_used + service.memory_request) / node.memory_capacity
+                if exp_cpu_util <= 0.8 and exp_mem_util <= 0.8:
                     action = i
                     break
 
-            # Không node nào fit → chọn node active có utilization thấp nhất
+            # 2) If none, choose first node that can allocate (best-effort)
+            if action is None:
+                for i, node in enumerate(nodes):
+                    if node.is_active and node.can_allocate(
+                        service.cpu_request, service.memory_request
+                    ):
+                        action = i
+                        break
+
+            # 3) If still none, choose active node with lowest utilization
             if action is None:
                 best_util = float("inf")
                 for i, node in enumerate(nodes):
@@ -101,7 +118,7 @@ def run_first_fit(num_nodes, num_services, n_episodes, seed) -> dict:
                             best_util = util
                             action = i
 
-            # Tất cả chết → chọn 0 (sẽ bị phạt)
+            # 4) If all nodes dead somehow, choose 0 (will be penalized)
             if action is None:
                 action = 0
 

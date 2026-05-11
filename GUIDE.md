@@ -1378,6 +1378,17 @@ def main():
     
     # Demo command
     demo_parser = subparsers.add_parser('demo', help='Run demo')
+
+    ### Lưu ý về kích thước môi trường (nodes / services)
+
+    - Nếu bạn thay đổi số node hoặc service, các model đã train trước đó có thể không hoạt động do kích thước không khớp (observation space thay đổi). Khi thấy lỗi "Observation spaces do not match", train lại agent với `--nodes` và `--services` tương ứng.
+
+    - Ví dụ: train model cho 10 nodes / 10 services:
+
+        ```bash
+        python train.py --agents ppo dqn a2c --timesteps 100000 --nodes 10 --services 10 --seed 0
+        python evaluate.py --nodes 10 --services 10 --episodes 50 --seed 0
+        ```
     
     args = parser.parse_args()
     
