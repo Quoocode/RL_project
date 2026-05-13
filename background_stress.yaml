@@ -1,0 +1,98 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: drl-scheduler
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: bg-light-m02
+  namespace: drl-scheduler
+  labels:
+    app: background-load
+spec:
+  nodeName: minikube-m02
+  restartPolicy: Never
+  containers:
+  - name: stress
+    image: python:3.11-alpine
+    command: ["/bin/sh", "-c"]
+    args:
+      - |
+        python - <<'PY' &
+        import time
+        x = bytearray(300 * 1024 * 1024)
+        time.sleep(36000)
+        PY
+        yes > /dev/null &
+        wait
+    resources:
+      requests:
+        cpu: "1000m"
+        memory: "512Mi"
+      limits:
+        cpu: "1000m"
+        memory: "512Mi"
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: bg-heavy-m03
+  namespace: drl-scheduler
+  labels:
+    app: background-load
+spec:
+  nodeName: minikube-m03
+  restartPolicy: Never
+  containers:
+  - name: stress
+    image: python:3.11-alpine
+    command: ["/bin/sh", "-c"]
+    args:
+      - |
+        python - <<'PY' &
+        import time
+        x = bytearray(1500 * 1024 * 1024)
+        time.sleep(36000)
+        PY
+        yes > /dev/null &
+        yes > /dev/null &
+        wait
+    resources:
+      requests:
+        cpu: "2000m"
+        memory: "2Gi"
+      limits:
+        cpu: "2000m"
+        memory: "2Gi"
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: bg-medium-m04
+  namespace: drl-scheduler
+  labels:
+    app: background-load
+spec:
+  nodeName: minikube-m04
+  restartPolicy: Never
+  containers:
+  - name: stress
+    image: python:3.11-alpine
+    command: ["/bin/sh", "-c"]
+    args:
+      - |
+        python - <<'PY' &
+        import time
+        x = bytearray(700 * 1024 * 1024)
+        time.sleep(36000)
+        PY
+        yes > /dev/null &
+        wait
+    resources:
+      requests:
+        cpu: "1000m"
+        memory: "1Gi"
+      limits:
+        cpu: "1000m"
+        memory: "1Gi"

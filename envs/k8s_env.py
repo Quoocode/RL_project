@@ -86,36 +86,90 @@ class K8sPlacementEnv(gym.Env):
     # PHẦN THƯỞNG
     # ──────────────────────────────────────────────────────────────────────────
     def _calculate_reward(self, service: Microservice,
-                          node_id: int, success: bool) -> float:
+                        node_id: int, success: bool) -> float:
         node = self.topology.get_node(node_id)
 
         if node is None:
-            # Hành động không hợp lệ (không nên xảy ra nhưng phòng hơn)
             return -50.0
 
         if not node.is_active:
-            return -50.0          # Chọn node chết
+            return -50.0
 
         if not success:
-            return -20.0          # Node sống nhưng không đủ tài nguyên
+            return -20.0
 
-        reward = 5.0              # Thưởng cơ bản khi xếp thành công
+        # 1. Thưởng cơ bản khi đặt thành công
+        reward = 5.0
 
-        # Phạt lũy tiến khi node quá tải (> 80%)
+        # 2. Utilization của node vừa chọn sau khi allocate
         cpu_util = node.cpu_used / node.cpu_capacity
+        mem_util = node.memory_used / node.memory_capacity
+
+        # 3. Phạt nếu node quá tải
         if cpu_util > 0.8:
             reward -= ((cpu_util - 0.8) * 50) ** 2
 
-        mem_util = node.memory_used / node.memory_capacity
         if mem_util > 0.8:
             reward -= ((mem_util - 0.8) * 50) ** 2
 
-        # Thưởng/phạt độ trễ so với service liền trước trong chain
+        # 4. Phạt mất cân bằng tải toàn cluster
+        active_nodes = [n for n in self.topology.nodes if n.is_active]
+
+        cpu_utils = np.array([
+            n.cpu_used / n.cpu_capacity for n in active_nodes
+        ])
+
+        mem_utils = np.array([
+            n.memory_used / n.memory_capacity for n in active_nodes
+        ])
+
+        avg_cpu = np.mean(cpu_utils)
+        avg_mem = np.mean(mem_utils)
+
+        cpu_std = np.std(cpu_utils)
+        mem_std = np.std(mem_utils)
+
+        imbalance_penalty = 6.0 * (cpu_std + mem_std)
+        reward -= imbalance_penalty
+
+        # 5. Phạt nếu chọn node nóng hơn trung bình cluster
+        hotspot_penalty = (
+            max(0.0, cpu_util - avg_cpu) +
+            max(0.0, mem_util - avg_mem)
+        )
+        reward -= 4.0 * hotspot_penalty
+
+        # 6. Phạt nếu gom quá nhiều service cùng chain vào cùng node
+        # Đây là phần quan trọng để sửa lỗi 5/5 service dồn vào m05 hoặc m06
+        same_node_count = sum(
+            1 for s in self.service_chain.services[:service.id]
+            if s.placed_on == node_id
+        )
+
+        reward -= 1.5 * same_node_count
+
+        # 7. Phạt nhẹ nếu node được chọn đã chứa nhiều service hơn các node khác
+        placed_counts = []
+        for n in self.topology.nodes:
+            count = sum(
+                1 for s in self.service_chain.services[:service.id + 1]
+                if s.placed_on == n.id
+            )
+            placed_counts.append(count)
+
+        chosen_count = placed_counts[node_id]
+        avg_count = np.mean(placed_counts)
+
+        if chosen_count > avg_count:
+            reward -= 0.8 * (chosen_count - avg_count)
+
+        # 8. Latency penalty giữa service liên tiếp
+        # Giảm nhẹ để latency không ép agent gom toàn bộ chain vào 1 node
         if service.id > 0:
             prev_service = self.service_chain.services[service.id - 1]
             if prev_service.placed_on >= 0:
                 latency = self.topology.get_latency(prev_service.placed_on, node_id)
-                reward -= min(latency * 0.5, 4.0)
+                reward -= min(latency * 0.15, 1.5)
 
         return reward
 
