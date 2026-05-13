@@ -1,0 +1,165 @@
+# background_workload.yaml
+# Simulate cluster đang bận — deploy trước khi chạy DRL scheduler
+# Mỗi node bị chiếm ~40-60% CPU và RAM để tạo áp lực thật
+#
+# Deploy:  kubectl apply -f background_workload.yaml
+# Cleanup: kubectl delete -f background_workload.yaml
+
+---
+# ── NODE m02: 2 pods chiếm ~50% tài nguyên ──────────────────────────────────
+apiVersion: v1
+kind: Pod
+metadata:
+  name: bg-m02-heavy
+  namespace: drl-scheduler
+  labels:
+    app: background
+spec:
+  nodeName: minikube-m02
+  restartPolicy: Always
+  containers:
+  - name: workload
+    image: nginx:alpine
+    resources:
+      requests:
+        cpu: "2000m"      # 2 cores / 8 cores = 25%
+        memory: "2048Mi"  # 2 GB / 7.8 GB = 26%
+      limits:
+        cpu: "2000m"
+        memory: "2048Mi"
+
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: bg-m02-light
+  namespace: drl-scheduler
+  labels:
+    app: background
+spec:
+  nodeName: minikube-m02
+  restartPolicy: Always
+  containers:
+  - name: workload
+    image: nginx:alpine
+    resources:
+      requests:
+        cpu: "1500m"      # tổng m02: ~43% CPU
+        memory: "1536Mi"  # tổng m02: ~46% RAM
+      limits:
+        cpu: "1500m"
+        memory: "1536Mi"
+
+---
+# ── NODE m03: 1 pod chiếm ~60% tài nguyên ───────────────────────────────────
+apiVersion: v1
+kind: Pod
+metadata:
+  name: bg-m03-heavy
+  namespace: drl-scheduler
+  labels:
+    app: background
+spec:
+  nodeName: minikube-m03
+  restartPolicy: Always
+  containers:
+  - name: workload
+    image: nginx:alpine
+    resources:
+      requests:
+        cpu: "3000m"      # 3 cores = 37% CPU
+        memory: "3584Mi"  # 3.5 GB = 46% RAM
+      limits:
+        cpu: "3000m"
+        memory: "3584Mi"
+
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: bg-m03-medium
+  namespace: drl-scheduler
+  labels:
+    app: background
+spec:
+  nodeName: minikube-m03
+  restartPolicy: Always
+  containers:
+  - name: workload
+    image: nginx:alpine
+    resources:
+      requests:
+        cpu: "1500m"      # tổng m03: ~56% CPU
+        memory: "1024Mi"  # tổng m03: ~59% RAM
+      limits:
+        cpu: "1500m"
+        memory: "1024Mi"
+
+---
+# ── NODE m04: nhẹ nhất — ~20% ────────────────────────────────────────────────
+apiVersion: v1
+kind: Pod
+metadata:
+  name: bg-m04-light
+  namespace: drl-scheduler
+  labels:
+    app: background
+spec:
+  nodeName: minikube-m04
+  restartPolicy: Always
+  containers:
+  - name: workload
+    image: nginx:alpine
+    resources:
+      requests:
+        cpu: "1000m"      # 1 core = 12% CPU
+        memory: "1536Mi"  # 1.5 GB = 20% RAM
+      limits:
+        cpu: "1000m"
+        memory: "1536Mi"
+
+---
+# ── NODE m05: trung bình ~35% ────────────────────────────────────────────────
+apiVersion: v1
+kind: Pod
+metadata:
+  name: bg-m05-medium
+  namespace: drl-scheduler
+  labels:
+    app: background
+spec:
+  nodeName: minikube-m05
+  restartPolicy: Always
+  containers:
+  - name: workload
+    image: nginx:alpine
+    resources:
+      requests:
+        cpu: "2000m"      # 2 cores = 25% CPU
+        memory: "2560Mi"  # 2.5 GB = 33% RAM
+      limits:
+        cpu: "2000m"
+        memory: "2560Mi"
+
+---
+# ── NODE m06: nhẹ — ~15% ────────────────────────────────────────────────────
+apiVersion: v1
+kind: Pod
+metadata:
+  name: bg-m06-light
+  namespace: drl-scheduler
+  labels:
+    app: background
+spec:
+  nodeName: minikube-m06
+  restartPolicy: Always
+  containers:
+  - name: workload
+    image: nginx:alpine
+    resources:
+      requests:
+        cpu: "800m"       # 0.8 cores = 10% CPU
+        memory: "1024Mi"  # 1 GB = 13% RAM
+      limits:
+        cpu: "800m"
+        memory: "1024Mi"
