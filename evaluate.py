@@ -41,22 +41,31 @@ def make_eval_env(num_nodes: int, num_services: int) -> K8sPlacementEnv:
 # ═════════════════════════════════════════════════════════════════════════════
 def run_random(num_nodes, num_services, n_episodes, seed) -> dict:
     env = make_eval_env(num_nodes, num_services)
-    rewards, placed_rates = [], []
+    episode_metrics = []
 
     for ep in range(n_episodes):
         obs, _ = env.reset(seed=seed + ep)
         env.action_space.seed(seed + ep)
+
         done = False
         ep_reward = 0.0
+
         while not done:
             action = env.action_space.sample()
             obs, reward, terminated, truncated, info = env.step(action)
+
             ep_reward += reward
             done = terminated or truncated
-        rewards.append(ep_reward)
-        placed_rates.append(info["placed_total"] / num_services)
 
-    return _stats(rewards, placed_rates)
+        episode_metrics.append(
+            collect_episode_metrics(
+                env=env,
+                ep_reward=ep_reward,
+                num_services=num_services
+            )
+        )
+
+    return _stats(episode_metrics=episode_metrics)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -68,7 +77,7 @@ def run_first_fit(num_nodes, num_services, n_episodes, seed) -> dict:
     Nếu không node nào fit → chọn node có utilization thấp nhất (best-effort).
     """
     env = make_eval_env(num_nodes, num_services)
-    rewards, placed_rates = [], []
+    episode_metrics = []
 
     for ep in range(n_episodes):
         obs, _ = env.reset(seed=seed + ep)
@@ -85,7 +94,8 @@ def run_first_fit(num_nodes, num_services, n_episodes, seed) -> dict:
             action = None
             for i, node in enumerate(nodes):
                 if node.is_active and node.can_allocate(
-                    service.cpu_request, service.memory_request
+                    service.cpu_request,
+                    service.memory_request
                 ):
                     action = i
                     break
@@ -93,26 +103,176 @@ def run_first_fit(num_nodes, num_services, n_episodes, seed) -> dict:
             # Không node nào fit → chọn node active có utilization thấp nhất
             if action is None:
                 best_util = float("inf")
+
                 for i, node in enumerate(nodes):
                     if node.is_active:
-                        util = (node.cpu_used / node.cpu_capacity +
-                                node.memory_used / node.memory_capacity) / 2
+                        util = (
+                            node.cpu_used / node.cpu_capacity +
+                            node.memory_used / node.memory_capacity
+                        ) / 2.0
+
                         if util < best_util:
                             best_util = util
                             action = i
 
-            # Tất cả chết → chọn 0 (sẽ bị phạt)
+            # Tất cả node chết → chọn 0 để env xử lý phạt
             if action is None:
                 action = 0
 
             obs, reward, terminated, truncated, info = env.step(action)
+
             ep_reward += reward
             done = terminated or truncated
 
-        rewards.append(ep_reward)
-        placed_rates.append(info["placed_total"] / num_services)
+        episode_metrics.append(
+            collect_episode_metrics(
+                env=env,
+                ep_reward=ep_reward,
+                num_services=num_services
+            )
+        )
 
-    return _stats(rewards, placed_rates)
+    return _stats(episode_metrics=episode_metrics)
+
+# ═════════════════════════════════════════════════════════════════════════════
+# BASELINE: LEAST-LOADED
+# ═════════════════════════════════════════════════════════════════════════════
+def run_least_loaded(num_nodes, num_services, n_episodes, seed) -> dict:
+    """
+    Least-Loaded: với mỗi service, chọn node active có tải trung bình
+    CPU/RAM thấp nhất mà vẫn đủ tài nguyên.
+
+    Nếu không node nào đủ tài nguyên → chọn node active có tải thấp nhất
+    để env xử lý thất bại/phạt.
+    """
+    env = make_eval_env(num_nodes, num_services)
+    episode_metrics = []
+
+    for ep in range(n_episodes):
+        obs, _ = env.reset(seed=seed + ep)
+        done = False
+        ep_reward = 0.0
+
+        while not done:
+            service = env.unwrapped.service_chain.services[
+                env.unwrapped.current_service_idx
+            ]
+            nodes = env.unwrapped.topology.nodes
+
+            action = None
+            best_score = float("inf")
+
+            # Ưu tiên node đủ tài nguyên và có tải thấp nhất
+            for i, node in enumerate(nodes):
+                if not node.is_active:
+                    continue
+
+                if node.can_allocate(service.cpu_request, service.memory_request):
+                    cpu_util = node.cpu_used / node.cpu_capacity
+                    mem_util = node.memory_used / node.memory_capacity
+
+                    score = (cpu_util + mem_util) / 2.0
+
+                    if score < best_score:
+                        best_score = score
+                        action = i
+
+            # Nếu không node nào đủ tài nguyên, chọn node active tải thấp nhất
+            if action is None:
+                best_score = float("inf")
+
+                for i, node in enumerate(nodes):
+                    if not node.is_active:
+                        continue
+
+                    cpu_util = node.cpu_used / node.cpu_capacity
+                    mem_util = node.memory_used / node.memory_capacity
+
+                    score = (cpu_util + mem_util) / 2.0
+
+                    if score < best_score:
+                        best_score = score
+                        action = i
+
+            # Nếu tất cả node chết
+            if action is None:
+                action = 0
+
+            obs, reward, terminated, truncated, info = env.step(action)
+
+            ep_reward += reward
+            done = terminated or truncated
+
+        episode_metrics.append(
+            collect_episode_metrics(
+                env=env,
+                ep_reward=ep_reward,
+                num_services=num_services
+            )
+        )
+
+    return _stats(episode_metrics=episode_metrics)
+
+# ═════════════════════════════════════════════════════════════════════════════
+# BASELINE: ROUND-ROBIN
+# ═════════════════════════════════════════════════════════════════════════════
+def run_round_robin(num_nodes, num_services, n_episodes, seed) -> dict:
+    """
+    Round-Robin: lần lượt chọn node theo vòng tròn 0 → 1 → 2 → ...
+    Nếu node hiện tại không đủ tài nguyên hoặc inactive, thử node tiếp theo.
+    Nếu không node nào fit → vẫn chọn node theo vòng để env xử lý fail/phạt.
+    """
+    env = make_eval_env(num_nodes, num_services)
+    episode_metrics = []
+
+    for ep in range(n_episodes):
+        obs, _ = env.reset(seed=seed + ep)
+        done = False
+        ep_reward = 0.0
+
+        rr_pointer = 0
+
+        while not done:
+            service = env.unwrapped.service_chain.services[
+                env.unwrapped.current_service_idx
+            ]
+            nodes = env.unwrapped.topology.nodes
+
+            action = None
+
+            # Thử lần lượt các node theo vòng tròn
+            for offset in range(num_nodes):
+                candidate = (rr_pointer + offset) % num_nodes
+                node = nodes[candidate]
+
+                if node.is_active and node.can_allocate(
+                    service.cpu_request,
+                    service.memory_request
+                ):
+                    action = candidate
+                    break
+
+            # Nếu không node nào fit, chọn node theo pointer hiện tại
+            if action is None:
+                action = rr_pointer % num_nodes
+
+            # Cập nhật pointer cho service kế tiếp
+            rr_pointer = (action + 1) % num_nodes
+
+            obs, reward, terminated, truncated, info = env.step(action)
+
+            ep_reward += reward
+            done = terminated or truncated
+
+        episode_metrics.append(
+            collect_episode_metrics(
+                env=env,
+                ep_reward=ep_reward,
+                num_services=num_services
+            )
+        )
+
+    return _stats(episode_metrics=episode_metrics)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -125,18 +285,14 @@ def run_ai_agent(name: str, model_path: str,
                  num_nodes, num_services, n_episodes, seed) -> dict:
     """
     Load model đã train và chạy evaluate.
-    FIX BUG CŨ: dùng SB3Class.load(path, env=env) thay vì
-    agent.model = agent.model.load(path) — cách cũ không bind env,
-    predict sẽ dùng sai observation space.
+    deterministic=True: agent luôn chọn action tốt nhất theo policy đã học.
     """
     env = make_eval_env(num_nodes, num_services)
     SB3Class = SB3_CLASS[name]
 
-    # ── FIX CHÍNH ──────────────────────────────────────────────────────────
     model = SB3Class.load(model_path, env=env)
-    # ───────────────────────────────────────────────────────────────────────
 
-    rewards, placed_rates = [], []
+    episode_metrics = []
 
     for ep in range(n_episodes):
         obs, _ = env.reset(seed=seed + ep)
@@ -144,23 +300,159 @@ def run_ai_agent(name: str, model_path: str,
         ep_reward = 0.0
 
         while not done:
-            # deterministic=True: luôn chọn action tốt nhất, không random
             action, _ = model.predict(obs, deterministic=True)
+
+            # SB3 có thể trả action dạng numpy.ndarray
+            # Env cần int để placed_on không bị lưu thành ndarray
+            action = int(action)
+
             obs, reward, terminated, truncated, info = env.step(action)
+
             ep_reward += reward
             done = terminated or truncated
 
-        rewards.append(ep_reward)
-        placed_rates.append(info["placed_total"] / num_services)
+        episode_metrics.append(
+            collect_episode_metrics(
+                env=env,
+                ep_reward=ep_reward,
+                num_services=num_services
+            )
+        )
 
-    return _stats(rewards, placed_rates)
+    return _stats(episode_metrics=episode_metrics)
+
+# ═════════════════════════════════════════════════════════════════════════════
+# EPISODE METRICS
+# ═════════════════════════════════════════════════════════════════════════════
+def collect_episode_metrics(env, ep_reward: float, num_services: int) -> dict:
+    """
+    Thu thập các metrics sau khi một episode kết thúc.
+
+    Mục tiêu:
+    - Không chỉ đo reward và placement rate
+    - Mà còn đo load balance, hotspot, latency cost, số node được dùng
+    """
+    raw_env = env.unwrapped
+    nodes = raw_env.topology.nodes
+    services = raw_env.service_chain.services
+
+    cpu_utils = np.array([
+        node.cpu_used / node.cpu_capacity if node.is_active else 1.0
+        for node in nodes
+    ])
+
+    mem_utils = np.array([
+        node.memory_used / node.memory_capacity if node.is_active else 1.0
+        for node in nodes
+    ])
+
+    placed_services = [
+        svc for svc in services
+        if svc.placed_on >= 0
+    ]
+
+    placed_count = len(placed_services)
+    failed_count = num_services - placed_count
+
+    used_nodes = len(set(
+        svc.placed_on for svc in placed_services
+    ))
+
+    # Tính latency cost giữa các service liên tiếp trong chain
+    total_latency = 0.0
+    latency_edges = 0
+
+    for i in range(1, len(services)):
+        prev_svc = services[i - 1]
+        cur_svc = services[i]
+
+        if prev_svc.placed_on >= 0 and cur_svc.placed_on >= 0:
+            latency = raw_env.topology.get_latency(
+                prev_svc.placed_on,
+                cur_svc.placed_on
+            )
+
+            if np.isfinite(latency):
+                total_latency += latency
+                latency_edges += 1
+
+    avg_latency = (
+        total_latency / latency_edges
+        if latency_edges > 0
+        else 0.0
+    )
+
+    return {
+        "reward": float(ep_reward),
+        "placed_rate": placed_count / num_services,
+        "failed_count": int(failed_count),
+        "used_nodes": int(used_nodes),
+        "max_cpu_util": float(np.max(cpu_utils)),
+        "max_mem_util": float(np.max(mem_utils)),
+        "avg_cpu_util": float(np.mean(cpu_utils)),
+        "avg_mem_util": float(np.mean(mem_utils)),
+        "cpu_imbalance": float(np.std(cpu_utils)),
+        "mem_imbalance": float(np.std(mem_utils)),
+        "hotspot_count": int(
+            np.sum((cpu_utils > 0.8) | (mem_utils > 0.8))
+        ),
+        "total_latency_cost": float(total_latency),
+        "avg_latency_cost": float(avg_latency),
+    }
 
 
 # ═════════════════════════════════════════════════════════════════════════════
 # HELPER STATS
 # ═════════════════════════════════════════════════════════════════════════════
-def _stats(rewards: list, placed_rates: list) -> dict:
+def _stats(rewards: list = None,
+           placed_rates: list = None,
+           episode_metrics: list = None) -> dict:
+    """
+    Tổng hợp kết quả evaluate.
+
+    Hỗ trợ 2 kiểu:
+    1. Kiểu cũ: rewards + placed_rates
+    2. Kiểu mới: episode_metrics chứa nhiều metric hơn
+    """
+
+    # ── Kiểu mới: dùng episode_metrics ─────────────────────────────────────
+    if episode_metrics is not None:
+        rewards = [m["reward"] for m in episode_metrics]
+
+        arr = np.array(rewards)
+
+        def mean_metric(key: str) -> float:
+            return float(np.mean([m[key] for m in episode_metrics]))
+
+        return {
+            # Reward metrics
+            "mean"                : float(np.mean(arr)),
+            "std"                 : float(np.std(arr)),
+            "max"                 : float(np.max(arr)),
+            "min"                 : float(np.min(arr)),
+
+            # Placement metrics
+            "placed_mean"         : mean_metric("placed_rate"),
+            "failed_mean"         : mean_metric("failed_count"),
+            "used_nodes_mean"     : mean_metric("used_nodes"),
+
+            # Resource utilization metrics
+            "avg_cpu_util_mean"   : mean_metric("avg_cpu_util"),
+            "avg_mem_util_mean"   : mean_metric("avg_mem_util"),
+            "max_cpu_util_mean"   : mean_metric("max_cpu_util"),
+            "max_mem_util_mean"   : mean_metric("max_mem_util"),
+            "cpu_imbalance_mean"  : mean_metric("cpu_imbalance"),
+            "mem_imbalance_mean"  : mean_metric("mem_imbalance"),
+            "hotspot_mean"        : mean_metric("hotspot_count"),
+
+            # Latency metrics
+            "total_latency_mean"  : mean_metric("total_latency_cost"),
+            "avg_latency_mean"    : mean_metric("avg_latency_cost"),
+        }
+
+    # ── Kiểu cũ: giữ tương thích với code hiện tại ─────────────────────────
     arr = np.array(rewards)
+
     return {
         "mean"        : float(np.mean(arr)),
         "std"         : float(np.std(arr)),
@@ -179,7 +471,18 @@ def draw_chart(labels: list, results: list[dict],
     stds  = [r["std"]         for r in results]
     rates = [r["placed_mean"] for r in results]
 
-    colors = ["#e74c3c", "#f39c12", "#3498db", "#9b59b6", "#2ecc71"]
+    colors = [
+    "#e74c3c",  # Random
+    "#f39c12",  # First-Fit
+    "#1abc9c",  # Least-Loaded
+    "#95a5a6",  # Round-Robin
+    "#3498db",  # PPO
+    "#2ecc71",  # DQN
+    "#9b59b6",  # A2C
+    "#34495e",  # fallback
+    "#e67e22",  # fallback
+]
+
     active_colors = colors[:len(labels)]
 
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
@@ -235,19 +538,59 @@ def draw_chart(labels: list, results: list[dict],
 # IN BẢNG KẾT QUẢ
 # ═════════════════════════════════════════════════════════════════════════════
 def print_table(labels: list, results: list[dict]):
-    print(f"\n{'═'*65}")
-    print(f"  KẾT QUẢ EVALUATE")
-    print(f"{'═'*65}")
-    print(f"  {'Agent':<18} {'Mean':>8} {'Std':>7} {'Max':>8} "
-          f"{'Min':>8} {'Placed%':>8}")
-    print(f"  {'-'*61}")
+    print(f"\n{'═'*90}")
+    print(f"  KẾT QUẢ EVALUATE — OVERALL")
+    print(f"{'═'*90}")
+    print(
+        f"  {'Agent':<14} "
+        f"{'Mean':>8} {'Std':>7} {'Max':>8} {'Min':>8} "
+        f"{'Placed%':>8} {'Fail':>6} {'UsedN':>6}"
+    )
+    print(f"  {'-'*86}")
+
     best_idx = int(np.argmax([r["mean"] for r in results]))
+
     for i, (label, r) in enumerate(zip(labels, results)):
         marker = " 🏆" if i == best_idx else ""
-        print(f"  {label:<18} {r['mean']:>8.2f} {r['std']:>7.2f} "
-              f"{r['max']:>8.2f} {r['min']:>8.2f} "
-              f"{r['placed_mean']*100:>7.1f}%{marker}")
-    print(f"{'═'*65}")
+
+        print(
+            f"  {label:<14} "
+            f"{r['mean']:>8.2f} "
+            f"{r['std']:>7.2f} "
+            f"{r['max']:>8.2f} "
+            f"{r['min']:>8.2f} "
+            f"{r['placed_mean']*100:>7.1f}% "
+            f"{r.get('failed_mean', 0.0):>6.2f} "
+            f"{r.get('used_nodes_mean', 0.0):>6.2f}"
+            f"{marker}"
+        )
+
+    print(f"{'═'*90}")
+
+    print(f"\n{'═'*90}")
+    print(f"  KẾT QUẢ EVALUATE — RESOURCE / LATENCY DETAILS")
+    print(f"{'═'*90}")
+    print(
+        f"  {'Agent':<14} "
+        f"{'CPUstd':>7} {'MEMstd':>7} "
+        f"{'MaxCPU':>7} {'MaxMEM':>7} "
+        f"{'Hotspot':>8} {'TotLat':>8} {'AvgLat':>8}"
+    )
+    print(f"  {'-'*86}")
+
+    for label, r in zip(labels, results):
+        print(
+            f"  {label:<14} "
+            f"{r.get('cpu_imbalance_mean', 0.0):>7.3f} "
+            f"{r.get('mem_imbalance_mean', 0.0):>7.3f} "
+            f"{r.get('max_cpu_util_mean', 0.0):>7.3f} "
+            f"{r.get('max_mem_util_mean', 0.0):>7.3f} "
+            f"{r.get('hotspot_mean', 0.0):>8.2f} "
+            f"{r.get('total_latency_mean', 0.0):>8.2f} "
+            f"{r.get('avg_latency_mean', 0.0):>8.2f}"
+        )
+
+    print(f"{'═'*90}")
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -290,7 +633,7 @@ if __name__ == "__main__":
     results = []
 
     # ── Baseline Random ──────────────────────────────────────────────────────
-    print("\n  [1/5] Random baseline...")
+    print("\n  [1/7] Random baseline...")
     labels.append("Random")
     results.append(run_random(N, S, EP, args.seed))
     r = results[-1]
@@ -298,12 +641,28 @@ if __name__ == "__main__":
           f"Placed: {r['placed_mean']*100:.1f}%")
 
     # ── Baseline First-Fit ───────────────────────────────────────────────────
-    print("\n  [2/5] First-Fit baseline...")
+    print("\n  [2/7] First-Fit baseline...")
     labels.append("First-Fit")
     results.append(run_first_fit(N, S, EP, args.seed))
     r = results[-1]
     print(f"        Mean: {r['mean']:.2f} ± {r['std']:.2f} | "
           f"Placed: {r['placed_mean']*100:.1f}%")
+    
+    # ── Baseline Least-Loaded ────────────────────────────────────────────────
+    print("\n  [3/7] Least-Loaded baseline...")
+    labels.append("Least-Loaded")
+    results.append(run_least_loaded(N, S, EP, args.seed))
+    r = results[-1]
+    print(f"        Mean: {r['mean']:.2f} ± {r['std']:.2f} | "
+        f"Placed: {r['placed_mean']*100:.1f}%")
+    
+    # ── Baseline Round-Robin ─────────────────────────────────────────────────
+    print("\n  [4/7] Round-Robin baseline...")
+    labels.append("Round-Robin")
+    results.append(run_round_robin(N, S, EP, args.seed))
+    r = results[-1]
+    print(f"        Mean: {r['mean']:.2f} ± {r['std']:.2f} | "
+        f"Placed: {r['placed_mean']*100:.1f}%")
 
     # ── AI Agents ────────────────────────────────────────────────────────────
     agent_names = {"ppo": "PPO", "dqn": "DQN", "a2c": "A2C"}

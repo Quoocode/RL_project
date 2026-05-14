@@ -45,16 +45,16 @@ from typing import List, Optional
 
 # 5 worker nodes (bỏ control-plane minikube)
 WORKER_NODES = [
-    "minikube-m02",
-    "minikube-m03",
-    "minikube-m04",
-    "minikube-m05",
-    "minikube-m06",
+    "gke-rl-placement-cluster-default-pool-566738bc-5kfd",
+    "gke-rl-placement-cluster-default-pool-566738bc-9xx7",
+    "gke-rl-placement-cluster-default-pool-566738bc-jc5z",
+    "gke-rl-placement-cluster-default-pool-566738bc-v3j0",
+    "gke-rl-placement-cluster-default-pool-566738bc-vpqn",
 ]
 
 # Capacity thật (từ kubectl get nodes)
-NODE_CPU_CAPACITY_CORES = 8.0      # 8 CPU cores
-NODE_MEM_CAPACITY_MB    = 7800.0   # ~7.6 GB
+NODE_CPU_CAPACITY_CORES = 0.94
+NODE_MEM_CAPACITY_MB    = 2800.0
 
 # Khớp với model đã train
 NUM_NODES     = 5   # số worker nodes
