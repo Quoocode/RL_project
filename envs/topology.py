@@ -103,30 +103,36 @@ class NetworkTopology:
         self._initialize_latency_matrix()
 
     def _initialize_nodes(self, config: Dict = None):
+        """
+        Khởi tạo các node trong cluster.
+
+        Env v2: sử dụng heterogeneous nodes thay vì tất cả node giống nhau.
+        Với 5 node mặc định:
+            Node 0: small   - 2 CPU / 4 GB  / 500 Mbps
+            Node 1: medium  - 4 CPU / 8 GB  / 1000 Mbps
+            Node 2: large   - 8 CPU / 16 GB / 2000 Mbps
+            Node 3: medium  - 4 CPU / 8 GB  / 1000 Mbps
+            Node 4: small   - 2 CPU / 4 GB  / 500 Mbps
+
+        Nếu num_nodes khác 5, pattern này sẽ được lặp lại.
+        """
+        node_profiles = [
+            {"name": "small",  "cpu": 2.0, "memory": 4.0,  "bandwidth": 500},
+            {"name": "medium", "cpu": 4.0, "memory": 8.0,  "bandwidth": 1000},
+            {"name": "large",  "cpu": 8.0, "memory": 16.0, "bandwidth": 2000},
+            {"name": "medium", "cpu": 4.0, "memory": 8.0,  "bandwidth": 1000},
+            {"name": "small",  "cpu": 2.0, "memory": 4.0,  "bandwidth": 500},
+        ]
+
         for i in range(self.num_nodes):
+            profile = node_profiles[i % len(node_profiles)]
+
             self.nodes.append(Node(
                 id=i,
-                cpu_capacity=4,
-                memory_capacity=8,
-                bandwidth=1000,
+                cpu_capacity=profile["cpu"],
+                memory_capacity=profile["memory"],
+                bandwidth=profile["bandwidth"],
             ))
-    
-    # def _initialize_nodes(self, config: Dict = None):
-    #     node_types = [
-    #         {'cpu': 2,  'memory': 4,  'bandwidth': 500},
-    #         {'cpu': 4,  'memory': 8,  'bandwidth': 1000},
-    #         {'cpu': 8,  'memory': 16, 'bandwidth': 2000},
-    #     ]
-    #     weights = [0.4, 0.4, 0.2]
-    #     chosen = np.random.choice(len(node_types), size=self.num_nodes, p=weights)
-    #     for i, t_idx in enumerate(chosen):
-    #         t = node_types[t_idx]
-    #         self.nodes.append(Node(
-    #             id=i,
-    #             cpu_capacity=t['cpu'],
-    #             memory_capacity=t['memory'],
-    #             bandwidth=t['bandwidth'],
-    #         ))
     
     def _initialize_latency_matrix(self):
         """Khởi tạo ma trận độ trễ ngẫu nhiên giữa các nodes (từ 1-10 ms)."""
@@ -152,8 +158,12 @@ class NetworkTopology:
             node.reset()
 
 def create_sample_topology(num_nodes: int = 5) -> NetworkTopology:
-    config = {'cpu_capacity': 8, 'memory_capacity': 16, 'bandwidth': 1000}
-    return NetworkTopology(num_nodes, config)
+    """
+    Tạo topology mẫu cho môi trường mô phỏng.
+
+    Env v2 mặc định dùng heterogeneous nodes.
+    """
+    return NetworkTopology(num_nodes)
 
 def create_sample_service_chain(num_services: int = 5, seed=None) -> ServiceChain:
     if seed is not None:

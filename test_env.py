@@ -52,6 +52,11 @@ def make_env(seed=42, **kwargs) -> K8sPlacementEnv:
     env.reset(seed=seed)
     return env
 
+def expected_obs_dim(num_nodes: int, num_services: int) -> int:
+    # Env v2: mỗi node có 4 feature:
+    # cpu_util, mem_util, cpu_capacity_norm, mem_capacity_norm
+    return num_nodes * 4 + 2 + num_services
+
 
 # ═════════════════════════════════════════════════════════════════════════════
 # NHÓM 1 — CẤU TRÚC SPACE
@@ -61,7 +66,7 @@ section("NHÓM 1 — Cấu trúc Observation & Action Space")
 def t_obs_shape():
     env = make_env(num_nodes=5, num_services=5)
     obs, _ = env.reset()
-    expected = 5*2 + 2 + 5   # (cpu,mem) * nodes + onehot services
+    expected = expected_obs_dim(5, 5)  # 4 features/node + service cpu/mem + onehot services
     assert obs.shape == (expected,), \
         f"Shape sai: got {obs.shape}, expected ({expected},)"
 
@@ -86,9 +91,9 @@ def t_custom_size():
     """Kiểm tra config khác mặc định."""
     env = K8sPlacementEnv(num_nodes=3, num_services=4)
     obs, _ = env.reset()
-    expected = 3*2 + 2 + 4
+    expected = expected_obs_dim(3, 4)
     assert obs.shape == (expected,), \
-        f"Shape sai với custom config: got {obs.shape}"
+        f"Shape sai với custom config: got {obs.shape}, expected ({expected},)"
     assert env.action_space.n == 3
 
 run_test("obs_shape",       t_obs_shape)

@@ -16,6 +16,7 @@ import os
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 import argparse
+import csv
 import numpy as np
 import matplotlib
 matplotlib.use("Agg")           # Không cần GUI, vẫn lưu được file
@@ -448,6 +449,9 @@ def _stats(rewards: list = None,
             # Latency metrics
             "total_latency_mean"  : mean_metric("total_latency_cost"),
             "avg_latency_mean"    : mean_metric("avg_latency_cost"),
+
+            # Raw per-episode metrics
+            "episode_metrics"     : episode_metrics,
         }
 
     # ── Kiểu cũ: giữ tương thích với code hiện tại ─────────────────────────
@@ -485,7 +489,7 @@ def draw_chart(labels: list, results: list[dict],
 
     active_colors = colors[:len(labels)]
 
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 6.5))
     fig.suptitle(
         f"So sánh hiệu suất — {num_nodes} nodes / {num_services} services",
         fontsize=15, fontweight="bold"
@@ -500,6 +504,10 @@ def draw_chart(labels: list, results: list[dict],
                  bar.get_height() + max(stds) * 0.1 + 1,
                  f"{mean:.1f}", ha="center", va="bottom",
                  fontsize=10, fontweight="bold")
+        
+    ax1.tick_params(axis="x", labelrotation=20)
+    for label in ax1.get_xticklabels():
+        label.set_ha("right")
 
     ax1.set_title("Mean Reward (± Std)", fontsize=12)
     ax1.set_ylabel("Reward")
@@ -521,6 +529,9 @@ def draw_chart(labels: list, results: list[dict],
                  f"{rate*100:.1f}%", ha="center", va="bottom",
                  fontsize=10, fontweight="bold")
 
+    ax2.tick_params(axis="x", labelrotation=20)
+    for label in ax2.get_xticklabels():
+        label.set_ha("right")
     ax2.set_title("Service Placement Rate", fontsize=12)
     ax2.set_ylabel("Tỉ lệ đặt thành công (%)")
     ax2.set_ylim(0, 115)
@@ -533,6 +544,199 @@ def draw_chart(labels: list, results: list[dict],
     plt.savefig(save_path, dpi=200, bbox_inches="tight")
     print(f"\n  ✅ Đã lưu biểu đồ: {save_path}")
 
+def draw_detailed_metrics_chart(labels: list, results: list[dict],
+                                num_nodes: int, num_services: int,
+                                save_dir: str):
+    """
+    Vẽ biểu đồ chi tiết cho các metrics ngoài reward:
+    - CPU imbalance
+    - Memory imbalance
+    - Total latency cost
+    - Used nodes
+    - Hotspot count
+    """
+    os.makedirs(save_dir, exist_ok=True)
+
+    cpu_imbalance = [
+        r.get("cpu_imbalance_mean", 0.0)
+        for r in results
+    ]
+
+    mem_imbalance = [
+        r.get("mem_imbalance_mean", 0.0)
+        for r in results
+    ]
+
+    total_latency = [
+        r.get("total_latency_mean", 0.0)
+        for r in results
+    ]
+
+    used_nodes = [
+        r.get("used_nodes_mean", 0.0)
+        for r in results
+    ]
+
+    hotspot_count = [
+        r.get("hotspot_mean", 0.0)
+        for r in results
+    ]
+
+    x = np.arange(len(labels))
+    width = 0.6
+
+    # ── Chart 1: CPU imbalance ─────────────────────────────────────────────
+    fig, ax = plt.subplots(figsize=(10, 5))
+    bars = ax.bar(x, cpu_imbalance, width=width)
+
+    ax.set_title(
+        f"CPU Load Imbalance — {num_nodes} nodes / {num_services} services",
+        fontsize=13,
+        fontweight="bold"
+    )
+    ax.set_ylabel("CPU imbalance (std)")
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels, rotation=20, ha="right")
+    ax.grid(axis="y", linestyle="--", alpha=0.5)
+
+    for bar, value in zip(bars, cpu_imbalance):
+        ax.text(
+            bar.get_x() + bar.get_width() / 2,
+            bar.get_height(),
+            f"{value:.3f}",
+            ha="center",
+            va="bottom",
+            fontsize=9,
+            fontweight="bold"
+        )
+
+    plt.tight_layout()
+    path = os.path.join(save_dir, "cpu_imbalance_chart.png")
+    plt.savefig(path, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+
+    # ── Chart 2: Memory imbalance ──────────────────────────────────────────
+    fig, ax = plt.subplots(figsize=(10, 5))
+    bars = ax.bar(x, mem_imbalance, width=width)
+
+    ax.set_title(
+        f"Memory Load Imbalance — {num_nodes} nodes / {num_services} services",
+        fontsize=13,
+        fontweight="bold"
+    )
+    ax.set_ylabel("Memory imbalance (std)")
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels, rotation=20, ha="right")
+    ax.grid(axis="y", linestyle="--", alpha=0.5)
+
+    for bar, value in zip(bars, mem_imbalance):
+        ax.text(
+            bar.get_x() + bar.get_width() / 2,
+            bar.get_height(),
+            f"{value:.3f}",
+            ha="center",
+            va="bottom",
+            fontsize=9,
+            fontweight="bold"
+        )
+
+    plt.tight_layout()
+    path = os.path.join(save_dir, "memory_imbalance_chart.png")
+    plt.savefig(path, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+
+    # ── Chart 3: Total latency cost ────────────────────────────────────────
+    fig, ax = plt.subplots(figsize=(10, 5))
+    bars = ax.bar(x, total_latency, width=width)
+
+    ax.set_title(
+        f"Total Service-Chain Latency Cost — {num_nodes} nodes / {num_services} services",
+        fontsize=13,
+        fontweight="bold"
+    )
+    ax.set_ylabel("Total latency cost")
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels, rotation=20, ha="right")
+    ax.grid(axis="y", linestyle="--", alpha=0.5)
+
+    for bar, value in zip(bars, total_latency):
+        ax.text(
+            bar.get_x() + bar.get_width() / 2,
+            bar.get_height(),
+            f"{value:.2f}",
+            ha="center",
+            va="bottom",
+            fontsize=9,
+            fontweight="bold"
+        )
+
+    plt.tight_layout()
+    path = os.path.join(save_dir, "latency_cost_chart.png")
+    plt.savefig(path, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+
+    # ── Chart 4: Used nodes ────────────────────────────────────────────────
+    fig, ax = plt.subplots(figsize=(10, 5))
+    bars = ax.bar(x, used_nodes, width=width)
+
+    ax.set_title(
+        f"Average Number of Used Nodes — {num_nodes} nodes / {num_services} services",
+        fontsize=13,
+        fontweight="bold"
+    )
+    ax.set_ylabel("Used nodes")
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels, rotation=20, ha="right")
+    ax.set_ylim(0, num_nodes + 0.5)
+    ax.grid(axis="y", linestyle="--", alpha=0.5)
+
+    for bar, value in zip(bars, used_nodes):
+        ax.text(
+            bar.get_x() + bar.get_width() / 2,
+            bar.get_height(),
+            f"{value:.2f}",
+            ha="center",
+            va="bottom",
+            fontsize=9,
+            fontweight="bold"
+        )
+
+    plt.tight_layout()
+    path = os.path.join(save_dir, "used_nodes_chart.png")
+    plt.savefig(path, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+
+    # ── Chart 5: Hotspot count ─────────────────────────────────────────────
+    fig, ax = plt.subplots(figsize=(10, 5))
+    bars = ax.bar(x, hotspot_count, width=width)
+
+    ax.set_title(
+        f"Average Hotspot Count — {num_nodes} nodes / {num_services} services",
+        fontsize=13,
+        fontweight="bold"
+    )
+    ax.set_ylabel("Hotspot count")
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels, rotation=20, ha="right")
+    ax.grid(axis="y", linestyle="--", alpha=0.5)
+
+    for bar, value in zip(bars, hotspot_count):
+        ax.text(
+            bar.get_x() + bar.get_width() / 2,
+            bar.get_height(),
+            f"{value:.2f}",
+            ha="center",
+            va="bottom",
+            fontsize=9,
+            fontweight="bold"
+        )
+
+    plt.tight_layout()
+    path = os.path.join(save_dir, "hotspot_count_chart.png")
+    plt.savefig(path, dpi=200, bbox_inches="tight")
+    plt.close(fig)
+
+    print(f"  ✅ Đã lưu biểu đồ chi tiết trong thư mục: {save_dir}")
 
 # ═════════════════════════════════════════════════════════════════════════════
 # IN BẢNG KẾT QUẢ
@@ -592,6 +796,170 @@ def print_table(labels: list, results: list[dict]):
 
     print(f"{'═'*90}")
 
+# ═════════════════════════════════════════════════════════════════════════════
+# LƯU KẾT QUẢ RA CSV
+# ═════════════════════════════════════════════════════════════════════════════
+def save_results_csv(labels: list, results: list[dict],
+                     num_nodes: int, num_services: int,
+                     episodes: int, seed: int,
+                     save_dir: str):
+    """
+    Lưu kết quả evaluate tổng hợp ra file CSV.
+
+    File này dùng cho:
+    - báo cáo
+    - vẽ biểu đồ sau này
+    - lưu bằng chứng thực nghiệm
+    """
+    os.makedirs(save_dir, exist_ok=True)
+
+    save_path = os.path.join(save_dir, "evaluation_metrics.csv")
+
+    fieldnames = [
+        "agent",
+        "num_nodes",
+        "num_services",
+        "episodes",
+        "seed",
+
+        "mean_reward",
+        "std_reward",
+        "max_reward",
+        "min_reward",
+
+        "placement_rate",
+        "failed_count",
+        "used_nodes",
+
+        "avg_cpu_util",
+        "avg_mem_util",
+        "max_cpu_util",
+        "max_mem_util",
+
+        "cpu_imbalance",
+        "mem_imbalance",
+        "hotspot_count",
+
+        "total_latency_cost",
+        "avg_latency_cost",
+    ]
+
+    with open(save_path, mode="w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+
+        for label, r in zip(labels, results):
+            writer.writerow({
+                "agent": label,
+                "num_nodes": num_nodes,
+                "num_services": num_services,
+                "episodes": episodes,
+                "seed": seed,
+
+                "mean_reward": r.get("mean", 0.0),
+                "std_reward": r.get("std", 0.0),
+                "max_reward": r.get("max", 0.0),
+                "min_reward": r.get("min", 0.0),
+
+                "placement_rate": r.get("placed_mean", 0.0),
+                "failed_count": r.get("failed_mean", 0.0),
+                "used_nodes": r.get("used_nodes_mean", 0.0),
+
+                "avg_cpu_util": r.get("avg_cpu_util_mean", 0.0),
+                "avg_mem_util": r.get("avg_mem_util_mean", 0.0),
+                "max_cpu_util": r.get("max_cpu_util_mean", 0.0),
+                "max_mem_util": r.get("max_mem_util_mean", 0.0),
+
+                "cpu_imbalance": r.get("cpu_imbalance_mean", 0.0),
+                "mem_imbalance": r.get("mem_imbalance_mean", 0.0),
+                "hotspot_count": r.get("hotspot_mean", 0.0),
+
+                "total_latency_cost": r.get("total_latency_mean", 0.0),
+                "avg_latency_cost": r.get("avg_latency_mean", 0.0),
+            })
+
+    print(f"\n  ✅ Đã lưu CSV metrics: {save_path}")
+
+# ═════════════════════════════════════════════════════════════════════════════
+# LƯU PER-EPISODE METRICS RA CSV
+# ═════════════════════════════════════════════════════════════════════════════
+def save_episode_metrics_csv(labels: list, results: list[dict],
+                             num_nodes: int, num_services: int,
+                             episodes: int, seed: int,
+                             save_dir: str):
+    """
+    Lưu metrics của từng episode ra CSV.
+
+    File này dùng để:
+    - phân tích biến động giữa các episode
+    - vẽ boxplot/error bar
+    - kiểm tra agent có ổn định hay chỉ tốt ở trung bình
+    """
+    os.makedirs(save_dir, exist_ok=True)
+
+    save_path = os.path.join(save_dir, "evaluation_episode_metrics.csv")
+
+    fieldnames = [
+        "agent",
+        "episode",
+        "num_nodes",
+        "num_services",
+        "episodes",
+        "seed",
+
+        "reward",
+        "placed_rate",
+        "failed_count",
+        "used_nodes",
+
+        "avg_cpu_util",
+        "avg_mem_util",
+        "max_cpu_util",
+        "max_mem_util",
+
+        "cpu_imbalance",
+        "mem_imbalance",
+        "hotspot_count",
+
+        "total_latency_cost",
+        "avg_latency_cost",
+    ]
+
+    with open(save_path, mode="w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+
+        for label, r in zip(labels, results):
+            episode_metrics = r.get("episode_metrics", [])
+
+            for ep_idx, m in enumerate(episode_metrics):
+                writer.writerow({
+                    "agent": label,
+                    "episode": ep_idx,
+                    "num_nodes": num_nodes,
+                    "num_services": num_services,
+                    "episodes": episodes,
+                    "seed": seed,
+
+                    "reward": m.get("reward", 0.0),
+                    "placed_rate": m.get("placed_rate", 0.0),
+                    "failed_count": m.get("failed_count", 0),
+                    "used_nodes": m.get("used_nodes", 0),
+
+                    "avg_cpu_util": m.get("avg_cpu_util", 0.0),
+                    "avg_mem_util": m.get("avg_mem_util", 0.0),
+                    "max_cpu_util": m.get("max_cpu_util", 0.0),
+                    "max_mem_util": m.get("max_mem_util", 0.0),
+
+                    "cpu_imbalance": m.get("cpu_imbalance", 0.0),
+                    "mem_imbalance": m.get("mem_imbalance", 0.0),
+                    "hotspot_count": m.get("hotspot_count", 0),
+
+                    "total_latency_cost": m.get("total_latency_cost", 0.0),
+                    "avg_latency_cost": m.get("avg_latency_cost", 0.0),
+                })
+
+    print(f"  ✅ Đã lưu per-episode CSV: {save_path}")
 
 # ═════════════════════════════════════════════════════════════════════════════
 # CLI
@@ -631,9 +999,10 @@ if __name__ == "__main__":
 
     labels  = []
     results = []
+    total_steps = 4 + len(args.agents)
 
     # ── Baseline Random ──────────────────────────────────────────────────────
-    print("\n  [1/7] Random baseline...")
+    print(f"\n  [1/{total_steps}] Random baseline...")
     labels.append("Random")
     results.append(run_random(N, S, EP, args.seed))
     r = results[-1]
@@ -641,7 +1010,7 @@ if __name__ == "__main__":
           f"Placed: {r['placed_mean']*100:.1f}%")
 
     # ── Baseline First-Fit ───────────────────────────────────────────────────
-    print("\n  [2/7] First-Fit baseline...")
+    print(f"\n  [2/{total_steps}] First-Fit baseline...")
     labels.append("First-Fit")
     results.append(run_first_fit(N, S, EP, args.seed))
     r = results[-1]
@@ -649,7 +1018,7 @@ if __name__ == "__main__":
           f"Placed: {r['placed_mean']*100:.1f}%")
     
     # ── Baseline Least-Loaded ────────────────────────────────────────────────
-    print("\n  [3/7] Least-Loaded baseline...")
+    print(f"\n  [3/{total_steps}] Least-Loaded baseline...")
     labels.append("Least-Loaded")
     results.append(run_least_loaded(N, S, EP, args.seed))
     r = results[-1]
@@ -657,7 +1026,7 @@ if __name__ == "__main__":
         f"Placed: {r['placed_mean']*100:.1f}%")
     
     # ── Baseline Round-Robin ─────────────────────────────────────────────────
-    print("\n  [4/7] Round-Robin baseline...")
+    print(f"\n  [4/{total_steps}] Round-Robin baseline...")
     labels.append("Round-Robin")
     results.append(run_round_robin(N, S, EP, args.seed))
     r = results[-1]
@@ -669,7 +1038,7 @@ if __name__ == "__main__":
     step = 3
     for name in args.agents:
         model_path = os.path.join(args.models_dir, f"{name}_model")
-        print(f"\n  [{step}/5] {name.upper()} agent — {model_path}.zip ...")
+        print(f"\n  [{step}/{total_steps}] {name.upper()} agent — {model_path}.zip ...")
         step += 1
         try:
             labels.append(agent_names[name])
@@ -688,6 +1057,31 @@ if __name__ == "__main__":
 
     # ── Kết quả ──────────────────────────────────────────────────────────────
     print_table(labels, results)
-    draw_chart(labels, results, N, S, args.results_dir)
 
-    print(f"\n  Chạy xong. Biểu đồ lưu tại: {args.results_dir}/comparison_chart.png")
+    save_results_csv(
+        labels=labels,
+        results=results,
+        num_nodes=N,
+        num_services=S,
+        episodes=EP,
+        seed=args.seed,
+        save_dir=args.results_dir,
+    )
+
+    save_episode_metrics_csv(
+    labels=labels,
+    results=results,
+    num_nodes=N,
+    num_services=S,
+    episodes=EP,
+    seed=args.seed,
+    save_dir=args.results_dir,
+    )   
+
+    draw_chart(labels, results, N, S, args.results_dir)
+    draw_detailed_metrics_chart(labels, results, N, S, args.results_dir)
+
+    print(f"\n  Chạy xong.")
+    print(f"  Biểu đồ lưu tại: {args.results_dir}/comparison_chart.png")
+    print(f"  CSV metrics lưu tại: {args.results_dir}/evaluation_metrics.csv")
+    print(f"  Per-episode CSV lưu tại: {args.results_dir}/evaluation_episode_metrics.csv")

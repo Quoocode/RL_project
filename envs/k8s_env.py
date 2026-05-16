@@ -29,7 +29,7 @@ class K8sPlacementEnv(gym.Env):
     metadata = {'render_modes': ['human']}
 
     def __init__(self, num_nodes: int = 5, num_services: int = 5,
-                 max_steps: int = 200):
+             max_steps: int = 200, enable_background_load: bool = True):
         super().__init__()
 
         self.num_nodes = num_nodes
@@ -38,10 +38,20 @@ class K8sPlacementEnv(gym.Env):
         # Về lý thuyết mỗi episode chỉ cần num_services bước, nhưng max_steps
         # là lưới an toàn cuối cùng tránh episode chạy mãi khi có lỗi logic.
         self.max_steps = max_steps
+        # Env v2: mô phỏng cluster không rỗng bằng background workload
+        self.enable_background_load = enable_background_load
 
         # Hạ tầng mạng và chuỗi service — tạo một lần, reset() sẽ làm sạch
         self.topology = create_sample_topology(num_nodes)
         self.service_chain = create_sample_service_chain(num_services, seed = 0)
+
+        # Dùng để normalize capacity của heterogeneous nodes
+        self.max_node_cpu_capacity = max(
+            node.cpu_capacity for node in self.topology.nodes
+        )
+        self.max_node_mem_capacity = max(
+            node.memory_capacity for node in self.topology.nodes
+        )
 
         # Bộ đếm nội bộ
         self.current_service_idx: int = 0
@@ -49,7 +59,13 @@ class K8sPlacementEnv(gym.Env):
 
         # Action / Observation space
         self.action_space = spaces.Discrete(num_nodes)
-        obs_dim = (num_nodes * 2) + 2 + num_services
+
+        # Env v2 observation:
+        # Mỗi node có 4 đặc trưng:
+        #   cpu_util, mem_util, cpu_capacity_norm, mem_capacity_norm
+        # Sau đó thêm:
+        #   service_cpu_norm, service_mem_norm, service_onehot
+        obs_dim = (num_nodes * 4) + 2 + num_services
         self.observation_space = spaces.Box(
             low=0.0, high=1.0, shape=(obs_dim,), dtype=np.float32
         )
@@ -61,11 +77,26 @@ class K8sPlacementEnv(gym.Env):
         obs = []
 
         for node in self.topology.nodes:
+            cpu_capacity_norm = node.cpu_capacity / self.max_node_cpu_capacity
+            mem_capacity_norm = node.memory_capacity / self.max_node_mem_capacity
+
             if not node.is_active:
-                obs.extend([1.0, 1.0])          # Node chết → coi như đầy
+                # Node chết → coi như full utilization,
+                # nhưng vẫn giữ capacity info để agent biết loại node.
+                obs.extend([
+                    1.0,
+                    1.0,
+                    cpu_capacity_norm,
+                    mem_capacity_norm,
+                ])
             else:
-                obs.append(node.cpu_used    / node.cpu_capacity)
-                obs.append(node.memory_used / node.memory_capacity)
+                obs.extend([
+                    node.cpu_used / node.cpu_capacity,
+                    node.memory_used / node.memory_capacity,
+                    cpu_capacity_norm,
+                    mem_capacity_norm,
+                ])
+        
         # THÊM MỚI: resource request của service hiện tại (normalized)
         # Agent cần biết service này nặng hay nhẹ để chọn node phù hợp
         if self.current_service_idx < self.num_services:
@@ -81,6 +112,40 @@ class K8sPlacementEnv(gym.Env):
         obs.extend(service_onehot)
 
         return np.array(obs, dtype=np.float32)
+    
+    # ──────────────────────────────────────────────────────────────────────────
+    # BACKGROUND LOAD
+    # ──────────────────────────────────────────────────────────────────────────
+    def _apply_background_load(self):
+        """
+        Tạo tải nền cho mỗi node sau reset.
+
+        Mục tiêu:
+        - Mô phỏng Kubernetes cluster không rỗng
+        - Làm Round-Robin và Least-Loaded khác nhau rõ hơn
+        - Tăng độ thực tế cho environment
+        """
+        if not self.enable_background_load:
+            return
+
+        for node in self.topology.nodes:
+            if not node.is_active:
+                continue
+
+            # Phần lớn node có tải nhẹ/vừa
+            cpu_frac = float(self.np_random.uniform(0.05, 0.35))
+            mem_frac = float(self.np_random.uniform(0.05, 0.35))
+
+            # Một số node có thể đang nóng CPU
+            if self.np_random.random() < 0.25:
+                cpu_frac = float(self.np_random.uniform(0.45, 0.70))
+
+            # Một số node có thể đang nóng RAM
+            if self.np_random.random() < 0.25:
+                mem_frac = float(self.np_random.uniform(0.45, 0.70))
+
+            node.cpu_used = round(cpu_frac * node.cpu_capacity, 4)
+            node.memory_used = round(mem_frac * node.memory_capacity, 4)
 
     # ──────────────────────────────────────────────────────────────────────────
     # PHẦN THƯỞNG
@@ -221,13 +286,21 @@ class K8sPlacementEnv(gym.Env):
     # ──────────────────────────────────────────────────────────────────────────
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
+
+        # Reset topology về trạng thái sạch trước
         self.topology.reset()
+
+        # Env v2: thêm background workload sau khi reset node
+        self._apply_background_load()
+
         # Tạo service chain mới mỗi episode với seed khác nhau
         self.service_chain = create_sample_service_chain(
             self.num_services, seed=seed
         )
+
         self.current_service_idx = 0
         self.step_count = 0
+
         return self._get_observation(), {}
 
     # ──────────────────────────────────────────────────────────────────────────
