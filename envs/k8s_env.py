@@ -172,6 +172,54 @@ class K8sPlacementEnv(gym.Env):
             node.memory_used = round(mem_frac * node.memory_capacity, 4)
 
     # ──────────────────────────────────────────────────────────────────────────
+    # HELPER TÍNH TRAFFIC-WEIGHTED LATENCY PENALTY THEO DEPENDENCY GRAPH
+    # ──────────────────────────────────────────────────────────────────────────
+    def _calculate_dependency_latency_penalty(self,
+                                              service: Microservice) -> float:
+        """
+        Tính latency penalty dựa trên traffic-weighted dependency graph.
+
+        Chỉ tính các dependency edge liên quan tới service vừa được đặt.
+        Một edge chỉ bị phạt khi cả hai đầu src/dst đã được placement.
+        """
+
+        if not hasattr(self.service_chain, "get_dependencies"):
+            return 0.0
+
+        dependency_edges = self.service_chain.get_dependencies()
+
+        if not dependency_edges:
+            return 0.0
+
+        total_weighted_latency = 0.0
+
+        for edge in dependency_edges:
+            # Chỉ xét edge có liên quan đến service vừa đặt
+            if edge.src != service.id and edge.dst != service.id:
+                continue
+
+            src_svc = self.service_chain.services[edge.src]
+            dst_svc = self.service_chain.services[edge.dst]
+
+            # Chỉ tính khi cả hai service đã được đặt
+            if src_svc.placed_on < 0 or dst_svc.placed_on < 0:
+                continue
+
+            latency = self.topology.get_latency(
+                src_svc.placed_on,
+                dst_svc.placed_on
+            )
+
+            if np.isfinite(latency):
+                total_weighted_latency += latency * float(edge.traffic_weight)
+
+        # Scale nhẹ để latency không ép agent gom toàn bộ service vào một node.
+        # Cap lại để một edge latency cao không phá toàn bộ reward.
+        latency_penalty = min(total_weighted_latency * 0.18, 2.5)
+
+        return latency_penalty
+
+    # ──────────────────────────────────────────────────────────────────────────
     # PHẦN THƯỞNG
     # ──────────────────────────────────────────────────────────────────────────
     def _calculate_reward(self, service: Microservice,
@@ -252,13 +300,17 @@ class K8sPlacementEnv(gym.Env):
         if chosen_count > avg_count:
             reward -= 0.8 * (chosen_count - avg_count)
 
-        # 8. Latency penalty giữa service liên tiếp
-        # Giảm nhẹ để latency không ép agent gom toàn bộ chain vào 1 node
-        if service.id > 0:
-            prev_service = self.service_chain.services[service.id - 1]
-            if prev_service.placed_on >= 0:
-                latency = self.topology.get_latency(prev_service.placed_on, node_id)
-                reward -= min(latency * 0.15, 1.5)
+        # 8. Traffic-weighted latency penalty theo dependency graph
+        #
+        # Thay vì chỉ xét service liền trước:
+        #   service[i-1] -> service[i]
+        #
+        # Env v3 xét các dependency edge có traffic_weight:
+        #   latency(src_node, dst_node) * traffic_weight
+        #
+        # Điều này làm reward bám sát bài toán microservice call graph hơn.
+        latency_penalty = self._calculate_dependency_latency_penalty(service)
+        reward -= latency_penalty
 
         return reward
 

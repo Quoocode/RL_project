@@ -82,17 +82,88 @@ class Microservice:
     # Node hiện tại đang chứa microservice (-1 nghĩa là chưa được đặt)
     placed_on: int = -1
 
+@dataclass
+class DependencyEdge:
+    """
+    Cạnh phụ thuộc giữa hai microservice.
+
+    traffic_weight:
+        Mức độ gọi / lưu lượng giữa hai service.
+        Weight càng cao thì latency giữa hai service càng quan trọng.
+    """
+    src: int
+    dst: int
+    max_latency: float = 5.0
+    traffic_weight: float = 1.0
 
 class ServiceChain:
-    """Đại diện cho một chuỗi microservice."""
+    """Đại diện cho một chuỗi / graph microservice."""
     def __init__(self, chain_id: int, services: List[Microservice]):
         self.chain_id = chain_id
         self.services = services
-        self.latency_requirements = {}  # Yêu cầu về độ trễ
-    
+
+        # Backward compatibility:
+        # Các phần code cũ vẫn có thể dùng latency_requirements[(src, dst)]
+        self.latency_requirements = {}
+
+        # Env v3:
+        # Dependency graph có trọng số traffic.
+        self.dependency_edges: List[DependencyEdge] = []
+
+    def add_dependency(self,
+                       src: int,
+                       dst: int,
+                       max_latency: float = 5.0,
+                       traffic_weight: float = 1.0):
+        """
+        Thêm dependency edge giữa hai service.
+
+        src, dst:
+            ID của source/destination service.
+
+        max_latency:
+            Ngưỡng latency mong muốn.
+
+        traffic_weight:
+            Mức độ quan trọng / lưu lượng giữa hai service.
+        """
+        if src < 0 or src >= len(self.services):
+            raise ValueError(f"Invalid src service id: {src}")
+
+        if dst < 0 or dst >= len(self.services):
+            raise ValueError(f"Invalid dst service id: {dst}")
+
+        if src == dst:
+            raise ValueError("Dependency edge cannot connect a service to itself")
+
+        edge = DependencyEdge(
+            src=src,
+            dst=dst,
+            max_latency=float(max_latency),
+            traffic_weight=float(traffic_weight),
+        )
+
+        self.dependency_edges.append(edge)
+
+        # Giữ lại dictionary cũ để không phá code hiện tại.
+        self.latency_requirements[(src, dst)] = float(max_latency)
+
     def add_latency_requirement(self, src: int, dst: int, max_latency: float):
-        """Thêm yêu cầu về độ trễ tối đa giữa 2 service."""
-        self.latency_requirements[(src, dst)] = max_latency
+        """
+        Hàm cũ, giữ lại để backward compatibility.
+
+        Mặc định traffic_weight = 1.0.
+        """
+        self.add_dependency(
+            src=src,
+            dst=dst,
+            max_latency=max_latency,
+            traffic_weight=1.0,
+        )
+
+    def get_dependencies(self) -> List[DependencyEdge]:
+        """Trả về danh sách dependency edges."""
+        return self.dependency_edges
 
 SERVICE_PROFILES = {
     # Service rất nhẹ, dùng để mô phỏng sidecar/helper service
@@ -261,13 +332,39 @@ def create_sample_service_chain(num_services: int = 5, seed=None) -> ServiceChai
             )
         )
 
+    # Tạo ServiceChain sau khi đã sinh xong danh sách services
     chain = ServiceChain(0, services)
-
-    # Hiện tại vẫn giữ chain tuyến tính:
-    # service-0 -> service-1 -> ... -> service-N
-    # Phần traffic-weighted dependency graph sẽ nâng cấp sau.
+    
+    # Env v3:
+    # Tạo traffic-weighted dependency graph.
+    #
+    # 1. Primary chain edges:
+    #    service-0 -> service-1 -> ... -> service-N
+    #    Đây là luồng chính, weight cao hơn.
     for i in range(num_services - 1):
-        chain.add_latency_requirement(i, i + 1, 5.0)
+        traffic_weight = round(float(rng.uniform(0.60, 1.00)), 2)
+
+        chain.add_dependency(
+            src=i,
+            dst=i + 1,
+            max_latency=5.0,
+            traffic_weight=traffic_weight,
+        )
+
+    # 2. Optional cross edges:
+    #    Mô phỏng các lời gọi phụ giữa các service không liền kề.
+    #    Weight thấp hơn vì đây không phải luồng chính.
+    if num_services >= 3:
+        for i in range(num_services - 2):
+            if rng.random() < 0.40:
+                traffic_weight = round(float(rng.uniform(0.10, 0.50)), 2)
+
+                chain.add_dependency(
+                    src=i,
+                    dst=i + 2,
+                    max_latency=8.0,
+                    traffic_weight=traffic_weight,
+                )
 
     return chain
 
@@ -289,4 +386,15 @@ if __name__ == "__main__":
         print(
             f"{svc.name}: type={svc.service_type}, "
             f"CPU={svc.cpu_request}, RAM={svc.memory_request}"
+        )
+
+    print("\n=== Dependency Graph mẫu ===")
+    for edge in chain.get_dependencies():
+        src_name = chain.services[edge.src].name
+        dst_name = chain.services[edge.dst].name
+
+        print(
+            f"{src_name} -> {dst_name}: "
+            f"max_latency={edge.max_latency}, "
+            f"traffic_weight={edge.traffic_weight}"
         )

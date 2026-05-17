@@ -359,46 +359,87 @@ def collect_episode_metrics(env, ep_reward: float, num_services: int) -> dict:
         svc.placed_on for svc in placed_services
     ))
 
-    # Tính latency cost giữa các service liên tiếp trong chain
-    # Tính latency cost giữa các service liên tiếp trong chain
+    # Tính latency cost theo traffic-weighted dependency graph.
+    #
+    # Nếu ServiceChain có dependency_edges:
+    #   weighted_latency = latency(src_node, dst_node) * traffic_weight
+    #
+    # Nếu service fail placement hoặc node latency không hợp lệ:
+    #   cộng weighted penalty để phản ánh service-chain/SLA violation.
     total_latency = 0.0
     latency_edges = 0
     failed_dependency_edges = 0
 
-    # Penalty nếu một dependency edge bị đứt do service fail placement.
-    # Giá trị này đại diện cho SLA / latency violation.
+    total_edge_weight = 0.0
+    failed_dependency_weight = 0.0
+
+    # Penalty nền cho một dependency edge bị đứt.
+    # Penalty thực tế sẽ được nhân với traffic_weight.
     FAILED_EDGE_LATENCY_PENALTY = 10.0
 
-    for i in range(1, len(services)):
-        prev_svc = services[i - 1]
-        cur_svc = services[i]
+    # Ưu tiên dùng dependency graph mới.
+    if hasattr(raw_env.service_chain, "get_dependencies"):
+        dependency_edges = raw_env.service_chain.get_dependencies()
+    else:
+        dependency_edges = []
 
-        if prev_svc.placed_on >= 0 and cur_svc.placed_on >= 0:
+    # Fallback để không vỡ code nếu chain cũ chưa có dependency graph.
+    # Khi đó vẫn tính theo tuyến tính như cũ, weight = 1.0.
+    if not dependency_edges:
+        dependency_edges = []
+        for i in range(1, len(services)):
+            dependency_edges.append({
+                "src": i - 1,
+                "dst": i,
+                "traffic_weight": 1.0,
+            })
+
+    for edge in dependency_edges:
+        # Hỗ trợ cả DependencyEdge object và dict fallback.
+        if isinstance(edge, dict):
+            src = edge["src"]
+            dst = edge["dst"]
+            traffic_weight = float(edge.get("traffic_weight", 1.0))
+        else:
+            src = edge.src
+            dst = edge.dst
+            traffic_weight = float(edge.traffic_weight)
+
+        total_edge_weight += traffic_weight
+
+        src_svc = services[src]
+        dst_svc = services[dst]
+
+        if src_svc.placed_on >= 0 and dst_svc.placed_on >= 0:
             latency = raw_env.topology.get_latency(
-                prev_svc.placed_on,
-                cur_svc.placed_on
+                src_svc.placed_on,
+                dst_svc.placed_on
             )
 
             if np.isfinite(latency):
-                total_latency += latency
+                total_latency += latency * traffic_weight
                 latency_edges += 1
+            else:
+                failed_dependency_edges += 1
+                failed_dependency_weight += traffic_weight
         else:
             failed_dependency_edges += 1
+            failed_dependency_weight += traffic_weight
 
     effective_latency = (
         total_latency +
-        failed_dependency_edges * FAILED_EDGE_LATENCY_PENALTY
+        failed_dependency_weight * FAILED_EDGE_LATENCY_PENALTY
     )
 
     avg_latency = (
-        total_latency / latency_edges
-        if latency_edges > 0
+        total_latency / total_edge_weight
+        if total_edge_weight > 0
         else 0.0
     )
 
     avg_effective_latency = (
-        effective_latency / (len(services) - 1)
-        if len(services) > 1
+        effective_latency / total_edge_weight
+        if total_edge_weight > 0
         else 0.0
     )
 
