@@ -32,16 +32,32 @@ from agents.ppo_agent import set_global_seed
 # ═════════════════════════════════════════════════════════════════════════════
 # TẠO ENV CHUẨN
 # ═════════════════════════════════════════════════════════════════════════════
-def make_eval_env(num_nodes: int, num_services: int) -> K8sPlacementEnv:
-    env = K8sPlacementEnv(num_nodes=num_nodes, num_services=num_services)
+def make_eval_env(num_nodes: int,
+                  num_services: int,
+                  topology_seed: int = 12345) -> K8sPlacementEnv:
+    """
+    Tạo env evaluate với topology/latency matrix cố định.
+
+    Lý do:
+    - Mỗi baseline/agent tạo env riêng.
+    - Nếu không cố định seed topology, mỗi method có thể chạy trên
+      latency matrix khác nhau, làm so sánh latency không công bằng.
+    """
+    np.random.seed(topology_seed)
+
+    env = K8sPlacementEnv(
+        num_nodes=num_nodes,
+        num_services=num_services
+    )
+
     return Monitor(env, filename=None)
 
 
 # ═════════════════════════════════════════════════════════════════════════════
 # BASELINE: RANDOM
 # ═════════════════════════════════════════════════════════════════════════════
-def run_random(num_nodes, num_services, n_episodes, seed) -> dict:
-    env = make_eval_env(num_nodes, num_services)
+def run_random(num_nodes, num_services, n_episodes, seed,topology_seed=12345) -> dict:
+    env = make_eval_env(num_nodes, num_services, topology_seed)
     episode_metrics = []
 
     for ep in range(n_episodes):
@@ -72,12 +88,8 @@ def run_random(num_nodes, num_services, n_episodes, seed) -> dict:
 # ═════════════════════════════════════════════════════════════════════════════
 # BASELINE: FIRST-FIT
 # ═════════════════════════════════════════════════════════════════════════════
-def run_first_fit(num_nodes, num_services, n_episodes, seed) -> dict:
-    """
-    First-Fit: với mỗi service, chọn node đầu tiên có đủ tài nguyên.
-    Nếu không node nào fit → chọn node có utilization thấp nhất (best-effort).
-    """
-    env = make_eval_env(num_nodes, num_services)
+def run_first_fit(num_nodes, num_services, n_episodes, seed, topology_seed=12345) -> dict:
+    env = make_eval_env(num_nodes, num_services, topology_seed)
     episode_metrics = []
 
     for ep in range(n_episodes):
@@ -138,15 +150,8 @@ def run_first_fit(num_nodes, num_services, n_episodes, seed) -> dict:
 # ═════════════════════════════════════════════════════════════════════════════
 # BASELINE: LEAST-LOADED
 # ═════════════════════════════════════════════════════════════════════════════
-def run_least_loaded(num_nodes, num_services, n_episodes, seed) -> dict:
-    """
-    Least-Loaded: với mỗi service, chọn node active có tải trung bình
-    CPU/RAM thấp nhất mà vẫn đủ tài nguyên.
-
-    Nếu không node nào đủ tài nguyên → chọn node active có tải thấp nhất
-    để env xử lý thất bại/phạt.
-    """
-    env = make_eval_env(num_nodes, num_services)
+def run_least_loaded(num_nodes, num_services, n_episodes, seed, topology_seed=12345) -> dict:
+    env = make_eval_env(num_nodes, num_services, topology_seed)
     episode_metrics = []
 
     for ep in range(n_episodes):
@@ -217,13 +222,8 @@ def run_least_loaded(num_nodes, num_services, n_episodes, seed) -> dict:
 # ═════════════════════════════════════════════════════════════════════════════
 # BASELINE: ROUND-ROBIN
 # ═════════════════════════════════════════════════════════════════════════════
-def run_round_robin(num_nodes, num_services, n_episodes, seed) -> dict:
-    """
-    Round-Robin: lần lượt chọn node theo vòng tròn 0 → 1 → 2 → ...
-    Nếu node hiện tại không đủ tài nguyên hoặc inactive, thử node tiếp theo.
-    Nếu không node nào fit → vẫn chọn node theo vòng để env xử lý fail/phạt.
-    """
-    env = make_eval_env(num_nodes, num_services)
+def run_round_robin(num_nodes, num_services, n_episodes, seed, topology_seed=12345) -> dict:
+    env = make_eval_env(num_nodes, num_services, topology_seed)
     episode_metrics = []
 
     for ep in range(n_episodes):
@@ -282,13 +282,13 @@ def run_round_robin(num_nodes, num_services, n_episodes, seed) -> dict:
 # Map tên agent → class SB3 tương ứng
 SB3_CLASS = {"ppo": PPO, "dqn": DQN, "a2c": A2C}
 
-def run_ai_agent(name: str, model_path: str,
-                 num_nodes, num_services, n_episodes, seed) -> dict:
+def run_ai_agent(name: str, model_path: str, num_nodes, num_services, n_episodes, seed, 
+                 topology_seed=12345) -> dict:
     """
     Load model đã train và chạy evaluate.
     deterministic=True: agent luôn chọn action tốt nhất theo policy đã học.
     """
-    env = make_eval_env(num_nodes, num_services)
+    env = make_eval_env(num_nodes, num_services, topology_seed)
     SB3Class = SB3_CLASS[name]
 
     model = SB3Class.load(model_path, env=env)
@@ -360,8 +360,14 @@ def collect_episode_metrics(env, ep_reward: float, num_services: int) -> dict:
     ))
 
     # Tính latency cost giữa các service liên tiếp trong chain
+    # Tính latency cost giữa các service liên tiếp trong chain
     total_latency = 0.0
     latency_edges = 0
+    failed_dependency_edges = 0
+
+    # Penalty nếu một dependency edge bị đứt do service fail placement.
+    # Giá trị này đại diện cho SLA / latency violation.
+    FAILED_EDGE_LATENCY_PENALTY = 10.0
 
     for i in range(1, len(services)):
         prev_svc = services[i - 1]
@@ -376,10 +382,23 @@ def collect_episode_metrics(env, ep_reward: float, num_services: int) -> dict:
             if np.isfinite(latency):
                 total_latency += latency
                 latency_edges += 1
+        else:
+            failed_dependency_edges += 1
+
+    effective_latency = (
+        total_latency +
+        failed_dependency_edges * FAILED_EDGE_LATENCY_PENALTY
+    )
 
     avg_latency = (
         total_latency / latency_edges
         if latency_edges > 0
+        else 0.0
+    )
+
+    avg_effective_latency = (
+        effective_latency / (len(services) - 1)
+        if len(services) > 1
         else 0.0
     )
 
@@ -399,6 +418,9 @@ def collect_episode_metrics(env, ep_reward: float, num_services: int) -> dict:
         ),
         "total_latency_cost": float(total_latency),
         "avg_latency_cost": float(avg_latency),
+        "failed_dependency_edges": int(failed_dependency_edges),
+        "effective_latency_cost": float(effective_latency),
+        "avg_effective_latency_cost": float(avg_effective_latency),
     }
 
 
@@ -449,6 +471,9 @@ def _stats(rewards: list = None,
             # Latency metrics
             "total_latency_mean"  : mean_metric("total_latency_cost"),
             "avg_latency_mean"    : mean_metric("avg_latency_cost"),
+            "failed_dependency_edges_mean": mean_metric("failed_dependency_edges"),
+            "effective_latency_mean": mean_metric("effective_latency_cost"),
+            "avg_effective_latency_mean": mean_metric("avg_effective_latency_cost"),
 
             # Raw per-episode metrics
             "episode_metrics"     : episode_metrics,
@@ -568,7 +593,7 @@ def draw_detailed_metrics_chart(labels: list, results: list[dict],
     ]
 
     total_latency = [
-        r.get("total_latency_mean", 0.0)
+        r.get("effective_latency_mean", r.get("total_latency_mean", 0.0))
         for r in results
     ]
 
@@ -650,11 +675,11 @@ def draw_detailed_metrics_chart(labels: list, results: list[dict],
     bars = ax.bar(x, total_latency, width=width)
 
     ax.set_title(
-        f"Total Service-Chain Latency Cost — {num_nodes} nodes / {num_services} services",
+        f"Effective Service-Chain Latency Cost — {num_nodes} nodes / {num_services} services",
         fontsize=13,
         fontweight="bold"
     )
-    ax.set_ylabel("Total latency cost")
+    ax.set_ylabel("Effective latency cost")
     ax.set_xticks(x)
     ax.set_xticklabels(labels, rotation=20, ha="right")
     ax.grid(axis="y", linestyle="--", alpha=0.5)
@@ -778,7 +803,7 @@ def print_table(labels: list, results: list[dict]):
         f"  {'Agent':<14} "
         f"{'CPUstd':>7} {'MEMstd':>7} "
         f"{'MaxCPU':>7} {'MaxMEM':>7} "
-        f"{'Hotspot':>8} {'TotLat':>8} {'AvgLat':>8}"
+        f"{'Hotspot':>8} {'TotLat':>8} {'EffLat':>8} {'BadEdge':>8}"
     )
     print(f"  {'-'*86}")
 
@@ -791,7 +816,8 @@ def print_table(labels: list, results: list[dict]):
             f"{r.get('max_mem_util_mean', 0.0):>7.3f} "
             f"{r.get('hotspot_mean', 0.0):>8.2f} "
             f"{r.get('total_latency_mean', 0.0):>8.2f} "
-            f"{r.get('avg_latency_mean', 0.0):>8.2f}"
+            f"{r.get('effective_latency_mean', 0.0):>8.2f} "
+            f"{r.get('failed_dependency_edges_mean', 0.0):>8.2f}"
         )
 
     print(f"{'═'*90}")
@@ -842,6 +868,9 @@ def save_results_csv(labels: list, results: list[dict],
 
         "total_latency_cost",
         "avg_latency_cost",
+        "failed_dependency_edges",
+        "effective_latency_cost",
+        "avg_effective_latency_cost",
     ]
 
     with open(save_path, mode="w", newline="", encoding="utf-8") as f:
@@ -876,6 +905,9 @@ def save_results_csv(labels: list, results: list[dict],
 
                 "total_latency_cost": r.get("total_latency_mean", 0.0),
                 "avg_latency_cost": r.get("avg_latency_mean", 0.0),
+                "failed_dependency_edges": r.get("failed_dependency_edges_mean", 0.0),
+                "effective_latency_cost": r.get("effective_latency_mean", 0.0),
+                "avg_effective_latency_cost": r.get("avg_effective_latency_mean", 0.0),
             })
 
     print(f"\n  ✅ Đã lưu CSV metrics: {save_path}")
@@ -923,6 +955,9 @@ def save_episode_metrics_csv(labels: list, results: list[dict],
 
         "total_latency_cost",
         "avg_latency_cost",
+        "failed_dependency_edges",
+        "effective_latency_cost",
+        "avg_effective_latency_cost",
     ]
 
     with open(save_path, mode="w", newline="", encoding="utf-8") as f:
@@ -957,6 +992,9 @@ def save_episode_metrics_csv(labels: list, results: list[dict],
 
                     "total_latency_cost": m.get("total_latency_cost", 0.0),
                     "avg_latency_cost": m.get("avg_latency_cost", 0.0),
+                    "failed_dependency_edges": m.get("failed_dependency_edges", 0),
+                    "effective_latency_cost": m.get("effective_latency_cost", 0.0),
+                    "avg_effective_latency_cost": m.get("avg_effective_latency_cost", 0.0),
                 })
 
     print(f"  ✅ Đã lưu per-episode CSV: {save_path}")
@@ -970,6 +1008,12 @@ def parse_args():
     )
     parser.add_argument("--episodes",    type=int, default=10)
     parser.add_argument("--seed",        type=int, default=999)
+    parser.add_argument(
+    "--topology-seed",
+    type=int,
+    default=12345,
+    help="Seed cố định cho topology/latency matrix khi evaluate"
+    )
     parser.add_argument("--nodes",       type=int, default=5)
     parser.add_argument("--services",    type=int, default=5)
     parser.add_argument("--models-dir",  type=str, default="./models")
@@ -992,9 +1036,13 @@ if __name__ == "__main__":
     N  = args.nodes
     S  = args.services
     EP = args.episodes
+    TOPO_SEED = args.topology_seed
 
     print(f"\n{'═'*55}")
-    print(f"  EVALUATE — {N} nodes | {S} services | {EP} episodes")
+    print(
+    f"  EVALUATE — {N} nodes | {S} services | {EP} episodes "
+    f"| topology_seed={TOPO_SEED}"
+    )
     print(f"{'═'*55}")
 
     labels  = []
@@ -1004,7 +1052,7 @@ if __name__ == "__main__":
     # ── Baseline Random ──────────────────────────────────────────────────────
     print(f"\n  [1/{total_steps}] Random baseline...")
     labels.append("Random")
-    results.append(run_random(N, S, EP, args.seed))
+    results.append(run_random(N, S, EP, args.seed, TOPO_SEED))
     r = results[-1]
     print(f"        Mean: {r['mean']:.2f} ± {r['std']:.2f} | "
           f"Placed: {r['placed_mean']*100:.1f}%")
@@ -1012,7 +1060,7 @@ if __name__ == "__main__":
     # ── Baseline First-Fit ───────────────────────────────────────────────────
     print(f"\n  [2/{total_steps}] First-Fit baseline...")
     labels.append("First-Fit")
-    results.append(run_first_fit(N, S, EP, args.seed))
+    results.append(run_first_fit(N, S, EP, args.seed, TOPO_SEED))
     r = results[-1]
     print(f"        Mean: {r['mean']:.2f} ± {r['std']:.2f} | "
           f"Placed: {r['placed_mean']*100:.1f}%")
@@ -1020,7 +1068,7 @@ if __name__ == "__main__":
     # ── Baseline Least-Loaded ────────────────────────────────────────────────
     print(f"\n  [3/{total_steps}] Least-Loaded baseline...")
     labels.append("Least-Loaded")
-    results.append(run_least_loaded(N, S, EP, args.seed))
+    results.append(run_least_loaded(N, S, EP, args.seed, TOPO_SEED))
     r = results[-1]
     print(f"        Mean: {r['mean']:.2f} ± {r['std']:.2f} | "
         f"Placed: {r['placed_mean']*100:.1f}%")
@@ -1028,14 +1076,14 @@ if __name__ == "__main__":
     # ── Baseline Round-Robin ─────────────────────────────────────────────────
     print(f"\n  [4/{total_steps}] Round-Robin baseline...")
     labels.append("Round-Robin")
-    results.append(run_round_robin(N, S, EP, args.seed))
+    results.append(run_round_robin(N, S, EP, args.seed, TOPO_SEED))
     r = results[-1]
     print(f"        Mean: {r['mean']:.2f} ± {r['std']:.2f} | "
         f"Placed: {r['placed_mean']*100:.1f}%")
 
     # ── AI Agents ────────────────────────────────────────────────────────────
     agent_names = {"ppo": "PPO", "dqn": "DQN", "a2c": "A2C"}
-    step = 3
+    step = 5
     for name in args.agents:
         model_path = os.path.join(args.models_dir, f"{name}_model")
         print(f"\n  [{step}/{total_steps}] {name.upper()} agent — {model_path}.zip ...")
@@ -1043,7 +1091,7 @@ if __name__ == "__main__":
         try:
             labels.append(agent_names[name])
             results.append(
-                run_ai_agent(name, model_path, N, S, EP, args.seed)
+                run_ai_agent(name, model_path, N, S, EP, args.seed, TOPO_SEED)
             )
             r = results[-1]
             print(f"        Mean: {r['mean']:.2f} ± {r['std']:.2f} | "

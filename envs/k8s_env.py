@@ -29,7 +29,8 @@ class K8sPlacementEnv(gym.Env):
     metadata = {'render_modes': ['human']}
 
     def __init__(self, num_nodes: int = 5, num_services: int = 5,
-             max_steps: int = 200, enable_background_load: bool = True):
+             max_steps: int = 200, enable_background_load: bool = True,
+             background_load_level: str = "medium"):
         super().__init__()
 
         self.num_nodes = num_nodes
@@ -40,6 +41,7 @@ class K8sPlacementEnv(gym.Env):
         self.max_steps = max_steps
         # Env v2: mô phỏng cluster không rỗng bằng background workload
         self.enable_background_load = enable_background_load
+        self.background_load_level = background_load_level
 
         # Hạ tầng mạng và chuỗi service — tạo một lần, reset() sẽ làm sạch
         self.topology = create_sample_topology(num_nodes)
@@ -120,29 +122,51 @@ class K8sPlacementEnv(gym.Env):
         """
         Tạo tải nền cho mỗi node sau reset.
 
-        Mục tiêu:
-        - Mô phỏng Kubernetes cluster không rỗng
-        - Làm Round-Robin và Least-Loaded khác nhau rõ hơn
-        - Tăng độ thực tế cho environment
+        Level:
+        - none   : không tạo background load
+        - light  : tải nền nhẹ
+        - medium : tải nền vừa, dùng làm default
+        - hard   : tải nền nặng, dùng cho scenario khó
         """
         if not self.enable_background_load:
             return
+
+        if self.background_load_level == "none":
+            return
+
+        if self.background_load_level == "light":
+            base_low, base_high = 0.03, 0.18
+            hot_prob = 0.10
+            hot_low, hot_high = 0.30, 0.45
+
+        elif self.background_load_level == "medium":
+            base_low, base_high = 0.05, 0.25
+            hot_prob = 0.15
+            hot_low, hot_high = 0.35, 0.55
+
+        elif self.background_load_level == "hard":
+            base_low, base_high = 0.10, 0.35
+            hot_prob = 0.25
+            hot_low, hot_high = 0.45, 0.70
+
+        else:
+            raise ValueError(
+                f"Unknown background_load_level={self.background_load_level}. "
+                "Use: none, light, medium, hard."
+            )
 
         for node in self.topology.nodes:
             if not node.is_active:
                 continue
 
-            # Phần lớn node có tải nhẹ/vừa
-            cpu_frac = float(self.np_random.uniform(0.05, 0.35))
-            mem_frac = float(self.np_random.uniform(0.05, 0.35))
+            cpu_frac = float(self.np_random.uniform(base_low, base_high))
+            mem_frac = float(self.np_random.uniform(base_low, base_high))
 
-            # Một số node có thể đang nóng CPU
-            if self.np_random.random() < 0.25:
-                cpu_frac = float(self.np_random.uniform(0.45, 0.70))
+            if self.np_random.random() < hot_prob:
+                cpu_frac = float(self.np_random.uniform(hot_low, hot_high))
 
-            # Một số node có thể đang nóng RAM
-            if self.np_random.random() < 0.25:
-                mem_frac = float(self.np_random.uniform(0.45, 0.70))
+            if self.np_random.random() < hot_prob:
+                mem_frac = float(self.np_random.uniform(hot_low, hot_high))
 
             node.cpu_used = round(cpu_frac * node.cpu_capacity, 4)
             node.memory_used = round(mem_frac * node.memory_capacity, 4)

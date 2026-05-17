@@ -75,6 +75,9 @@ class Microservice:
     name: str
     cpu_request: float       # CPU yêu cầu (cores)
     memory_request: float    # RAM yêu cầu (GB)
+
+    # Loại workload: tiny, cpu-heavy, memory-heavy, balanced, large
+    service_type: str = "balanced"
     
     # Node hiện tại đang chứa microservice (-1 nghĩa là chưa được đặt)
     placed_on: int = -1
@@ -91,6 +94,37 @@ class ServiceChain:
         """Thêm yêu cầu về độ trễ tối đa giữa 2 service."""
         self.latency_requirements[(src, dst)] = max_latency
 
+SERVICE_PROFILES = {
+    # Service rất nhẹ, dùng để mô phỏng sidecar/helper service
+    "tiny": {
+        "cpu": (0.10, 0.35),
+        "memory": (0.20, 0.80),
+    },
+
+    # CPU-heavy: phù hợp với xử lý tính toán
+    "cpu-heavy": {
+        "cpu": (1.30, 2.00),
+        "memory": (0.60, 1.60),
+    },
+
+    # Memory-heavy: phù hợp với cache, in-memory processing
+    "memory-heavy": {
+        "cpu": (0.30, 0.90),
+        "memory": (2.50, 4.00),
+    },
+
+    # Balanced: CPU/RAM tương đối vừa
+    "balanced": {
+        "cpu": (0.70, 1.30),
+        "memory": (1.20, 2.60),
+    },
+
+    # Large: gần sát giới hạn của small node
+    "large": {
+        "cpu": (1.50, 2.00),
+        "memory": (3.00, 4.00),
+    },
+}
 
 class NetworkTopology:
     """Mô hình hóa topology mạng của cluster."""
@@ -166,16 +200,75 @@ def create_sample_topology(num_nodes: int = 5) -> NetworkTopology:
     return NetworkTopology(num_nodes)
 
 def create_sample_service_chain(num_services: int = 5, seed=None) -> ServiceChain:
-    if seed is not None:
-        np.random.seed(seed)
+    """
+    Tạo chuỗi microservice với workload đa dạng.
+
+    Env v2:
+    - Không còn sinh CPU/RAM đều đều trong một khoảng chung.
+    - Mỗi service thuộc một profile cụ thể:
+        tiny, cpu-heavy, memory-heavy, balanced, large
+    - Với num_services=5, mỗi episode sẽ có đủ 5 loại service,
+      nhưng thứ tự được shuffle theo seed.
+    """
+    rng = np.random.default_rng(seed)
+
+    profile_names = list(SERVICE_PROFILES.keys())
+
+    # Nếu số service <= số profile, lấy một tập profile rồi shuffle.
+    # Với 5 services mặc định, mỗi episode có đủ:
+    # tiny, cpu-heavy, memory-heavy, balanced, large.
+    if num_services <= len(profile_names):
+        selected_profiles = profile_names.copy()
+        rng.shuffle(selected_profiles)
+        selected_profiles = selected_profiles[:num_services]
+    else:
+        # Nếu service nhiều hơn profile, sample thêm theo xác suất.
+        # Có chủ ý cho balanced/cpu-heavy/memory-heavy xuất hiện nhiều hơn.
+        weights = np.array([
+            0.15,  # tiny
+            0.25,  # cpu-heavy
+            0.25,  # memory-heavy
+            0.25,  # balanced
+            0.10,  # large
+        ], dtype=float)
+        weights = weights / weights.sum()
+
+        selected_profiles = list(rng.choice(
+            profile_names,
+            size=num_services,
+            replace=True,
+            p=weights
+        ))
+
     services = []
-    for i in range(num_services):
-        cpu_req = round(np.random.uniform(0.5, 2.0), 2)
-        mem_req = round(np.random.uniform(1.0, 4.0), 2)
-        services.append(Microservice(i, f"service-{i}", cpu_req, mem_req))
+
+    for i, service_type in enumerate(selected_profiles):
+        profile = SERVICE_PROFILES[service_type]
+
+        cpu_low, cpu_high = profile["cpu"]
+        mem_low, mem_high = profile["memory"]
+
+        cpu_req = round(float(rng.uniform(cpu_low, cpu_high)), 2)
+        mem_req = round(float(rng.uniform(mem_low, mem_high)), 2)
+
+        services.append(
+            Microservice(
+                id=i,
+                name=f"{service_type}-{i}",
+                cpu_request=cpu_req,
+                memory_request=mem_req,
+                service_type=service_type,
+            )
+        )
+
     chain = ServiceChain(0, services)
+
+    # Hiện tại vẫn giữ chain tuyến tính:
+    # service-0 -> service-1 -> ... -> service-N
+    # Phần traffic-weighted dependency graph sẽ nâng cấp sau.
     for i in range(num_services - 1):
         chain.add_latency_requirement(i, i + 1, 5.0)
+
     return chain
 
 if __name__ == "__main__":
@@ -189,3 +282,11 @@ if __name__ == "__main__":
     topology.nodes[1].fail()
     print(f"Node 1 Active: {topology.nodes[1].is_active}")
     print(f"CPU rảnh của Node 1: {topology.nodes[1].cpu_available} (Dù tổng capacity là {topology.nodes[1].cpu_capacity})")
+
+    print("\n=== Service Chain mẫu ===")
+    chain = create_sample_service_chain(5, seed=42)
+    for svc in chain.services:
+        print(
+            f"{svc.name}: type={svc.service_type}, "
+            f"CPU={svc.cpu_request}, RAM={svc.memory_request}"
+        )
