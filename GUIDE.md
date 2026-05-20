@@ -391,6 +391,53 @@ def create_sample_service_chain() -> ServiceChain:
     return chain
 ```
 
+## **Dynamic 8n10: Mở rộng environment để hỗ trợ up-to MAX_NODES x MAX_SERVICES**
+
+Mục tiêu: có một môi trường duy nhất với observation/action shape cố định
+cho mọi scenario có kích thước nhỏ hơn hoặc bằng MAX_NODES x MAX_SERVICES.
+
+- MAX_NODES = 8, MAX_SERVICES = 10 (mặc định trong repo này)
+- Các scenario nhỏ hơn sẽ được padding bằng zero-vector và có mask để
+    agent biết node/service nào là thực.
+
+Thiết kế chính:
+- Observation = [node_features (8 x 5), service_features (10 x 4),
+    dependency_matrix (10 x 10), current_service_onehot (10),
+    valid_node_mask (8), valid_service_mask (10)]
+- Action space = Discrete(MAX_NODES) — trả về index node (0..7)
+- Invalid actions (chọn padding node / inactive / insufficient resource)
+    sẽ bị phạt (padding/inactive = -50, insufficient = -20) và env vẫn
+    tiếp tục (current_service_idx tăng lên).
+
+Lợi ích:
+- Một model duy nhất có thể áp dụng cho 5n5, 5n8, 6n10, 8n10, ...
+- Dễ dàng mở rộng sang GNN/attention-based policy sau này.
+
+CLI và ví dụ sử dụng:
+
+- Train PPO với dynamic env (max 8n10):
+
+```bash
+python agents/ppo_agent.py --nodes 5 --services 5 --max-nodes 8 --max-services 10 --timesteps 100000
+```
+
+- Train toàn bộ agents dùng `train.py` với dynamic env:
+
+```bash
+python train.py --agents ppo dqn --nodes 5 --services 5 --max-nodes 8 --max-services 10 --timesteps 100000
+```
+
+- Evaluate trên 8 nodes / 10 services (3 episodes nhanh):
+
+```bash
+python evaluate.py --nodes 8 --services 10 --episodes 3 --max-nodes 8 --max-services 10
+```
+
+Kiểm tra nhanh (checklist):
+- Chạy `python test_env.py` — tất cả tests phải PASS.
+- Chạy `evaluate.py` trên 5n5 và 8n10 để đảm bảo pipeline hoạt động.
+
+
 ### 5.3 Test Topology
 
 ```python

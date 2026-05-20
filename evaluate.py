@@ -13,6 +13,9 @@ Tuỳ chỉnh:
 
 import sys
 import os
+# Workaround: allow duplicate OpenMP runtimes to avoid libomp/libiomp5md conflict.
+# Set before importing libraries that may initialise OpenMP.
+os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 import argparse
@@ -34,7 +37,9 @@ from agents.ppo_agent import set_global_seed
 # ═════════════════════════════════════════════════════════════════════════════
 def make_eval_env(num_nodes: int,
                   num_services: int,
-                  topology_seed: int = 12345) -> K8sPlacementEnv:
+                  topology_seed: int = 12345,
+                  max_nodes: int = None,
+                  max_services: int = None) -> K8sPlacementEnv:
     """
     Tạo env evaluate với topology/latency matrix cố định.
 
@@ -45,10 +50,19 @@ def make_eval_env(num_nodes: int,
     """
     np.random.seed(topology_seed)
 
-    env = K8sPlacementEnv(
-        num_nodes=num_nodes,
-        num_services=num_services
-    )
+    if max_nodes is not None or max_services is not None:
+        from envs.k8s_env import K8sPlacementEnvDynamic
+        env = K8sPlacementEnvDynamic(
+            actual_num_nodes=num_nodes,
+            actual_num_services=num_services,
+            max_nodes=max_nodes or num_nodes,
+            max_services=max_services or num_services,
+        )
+    else:
+        env = K8sPlacementEnv(
+            num_nodes=num_nodes,
+            num_services=num_services
+        )
 
     return Monitor(env, filename=None)
 
@@ -56,8 +70,10 @@ def make_eval_env(num_nodes: int,
 # ═════════════════════════════════════════════════════════════════════════════
 # BASELINE: RANDOM
 # ═════════════════════════════════════════════════════════════════════════════
-def run_random(num_nodes, num_services, n_episodes, seed,topology_seed=12345) -> dict:
-    env = make_eval_env(num_nodes, num_services, topology_seed)
+def run_random(num_nodes, num_services, n_episodes, seed, topology_seed=12345,
+               max_nodes=None, max_services=None) -> dict:
+    env = make_eval_env(num_nodes, num_services, topology_seed,
+                        max_nodes=max_nodes, max_services=max_services)
     episode_metrics = []
 
     for ep in range(n_episodes):
@@ -88,8 +104,10 @@ def run_random(num_nodes, num_services, n_episodes, seed,topology_seed=12345) ->
 # ═════════════════════════════════════════════════════════════════════════════
 # BASELINE: FIRST-FIT
 # ═════════════════════════════════════════════════════════════════════════════
-def run_first_fit(num_nodes, num_services, n_episodes, seed, topology_seed=12345) -> dict:
-    env = make_eval_env(num_nodes, num_services, topology_seed)
+def run_first_fit(num_nodes, num_services, n_episodes, seed, topology_seed=12345,
+                  max_nodes=None, max_services=None) -> dict:
+    env = make_eval_env(num_nodes, num_services, topology_seed,
+                        max_nodes=max_nodes, max_services=max_services)
     episode_metrics = []
 
     for ep in range(n_episodes):
@@ -150,8 +168,10 @@ def run_first_fit(num_nodes, num_services, n_episodes, seed, topology_seed=12345
 # ═════════════════════════════════════════════════════════════════════════════
 # BASELINE: LEAST-LOADED
 # ═════════════════════════════════════════════════════════════════════════════
-def run_least_loaded(num_nodes, num_services, n_episodes, seed, topology_seed=12345) -> dict:
-    env = make_eval_env(num_nodes, num_services, topology_seed)
+def run_least_loaded(num_nodes, num_services, n_episodes, seed, topology_seed=12345,
+                     max_nodes=None, max_services=None) -> dict:
+    env = make_eval_env(num_nodes, num_services, topology_seed,
+                        max_nodes=max_nodes, max_services=max_services)
     episode_metrics = []
 
     for ep in range(n_episodes):
@@ -222,8 +242,10 @@ def run_least_loaded(num_nodes, num_services, n_episodes, seed, topology_seed=12
 # ═════════════════════════════════════════════════════════════════════════════
 # BASELINE: ROUND-ROBIN
 # ═════════════════════════════════════════════════════════════════════════════
-def run_round_robin(num_nodes, num_services, n_episodes, seed, topology_seed=12345) -> dict:
-    env = make_eval_env(num_nodes, num_services, topology_seed)
+def run_round_robin(num_nodes, num_services, n_episodes, seed, topology_seed=12345,
+                    max_nodes=None, max_services=None) -> dict:
+    env = make_eval_env(num_nodes, num_services, topology_seed,
+                        max_nodes=max_nodes, max_services=max_services)
     episode_metrics = []
 
     for ep in range(n_episodes):
@@ -282,18 +304,39 @@ def run_round_robin(num_nodes, num_services, n_episodes, seed, topology_seed=123
 # Map tên agent → class SB3 tương ứng
 SB3_CLASS = {"ppo": PPO, "dqn": DQN, "a2c": A2C}
 
-def run_ai_agent(name: str, model_path: str, num_nodes, num_services, n_episodes, seed, 
-                 topology_seed=12345) -> dict:
+def run_ai_agent(name: str, model_path: str, num_nodes, num_services, n_episodes, seed,
+                 topology_seed=12345, max_nodes=None, max_services=None) -> dict:
     """
     Load model đã train và chạy evaluate.
     deterministic=True: agent luôn chọn action tốt nhất theo policy đã học.
     """
-    env = make_eval_env(num_nodes, num_services, topology_seed)
+    env = make_eval_env(num_nodes, num_services, topology_seed,
+                        max_nodes=max_nodes, max_services=max_services)
     SB3Class = SB3_CLASS[name]
 
-    model = SB3Class.load(model_path, env=env)
+    # Try to load model bound to env (preferred). If observation space doesn't
+    # match (models trained on older env), fall back to loading model without
+    # env and use a simple observation projection to match expected input dim.
+    try:
+        model = SB3Class.load(model_path, env=env)
+        loaded_with_env = True
+    except Exception as e:
+        # Common failure: Observation spaces do not match
+        print(f"  ⚠️  Warning: failed to load {model_path} with env: {e}")
+        print("          Falling back to loading model without env and using observation projection.")
+        model = SB3Class.load(model_path)
+        loaded_with_env = False
 
     episode_metrics = []
+
+    # If we loaded without env, determine expected observation dim
+    if not loaded_with_env:
+        try:
+            expected_shape = model.policy.observation_space.shape
+            expected_dim = int(np.prod(expected_shape))
+        except Exception:
+            expected_dim = None
+            print("  ⚠️  Could not determine model expected observation shape; using raw env obs.")
 
     for ep in range(n_episodes):
         obs, _ = env.reset(seed=seed + ep)
@@ -301,10 +344,15 @@ def run_ai_agent(name: str, model_path: str, num_nodes, num_services, n_episodes
         ep_reward = 0.0
 
         while not done:
-            action, _ = model.predict(obs, deterministic=True)
+            obs_for_model = obs
+            if not loaded_with_env and expected_dim is not None:
+                # Simple heuristic: take the first expected_dim elements
+                # from the dynamic observation to match legacy model input.
+                obs_for_model = obs[:expected_dim]
+
+            action, _ = model.predict(obs_for_model, deterministic=True)
 
             # SB3 có thể trả action dạng numpy.ndarray
-            # Env cần int để placed_on không bị lưu thành ndarray
             action = int(action)
 
             obs, reward, terminated, truncated, info = env.step(action)
@@ -1057,6 +1105,10 @@ def parse_args():
     )
     parser.add_argument("--nodes",       type=int, default=5)
     parser.add_argument("--services",    type=int, default=5)
+    parser.add_argument("--max-nodes",   type=int, default=None,
+                        help="Max nodes for dynamic env (optional)")
+    parser.add_argument("--max-services",type=int, default=None,
+                        help="Max services for dynamic env (optional)")
     parser.add_argument("--models-dir",  type=str, default="./models")
     parser.add_argument("--results-dir", type=str, default="./results")
     parser.add_argument(
@@ -1093,7 +1145,8 @@ if __name__ == "__main__":
     # ── Baseline Random ──────────────────────────────────────────────────────
     print(f"\n  [1/{total_steps}] Random baseline...")
     labels.append("Random")
-    results.append(run_random(N, S, EP, args.seed, TOPO_SEED))
+    results.append(run_random(N, S, EP, args.seed, TOPO_SEED,
+                              max_nodes=args.max_nodes, max_services=args.max_services))
     r = results[-1]
     print(f"        Mean: {r['mean']:.2f} ± {r['std']:.2f} | "
           f"Placed: {r['placed_mean']*100:.1f}%")
@@ -1101,7 +1154,8 @@ if __name__ == "__main__":
     # ── Baseline First-Fit ───────────────────────────────────────────────────
     print(f"\n  [2/{total_steps}] First-Fit baseline...")
     labels.append("First-Fit")
-    results.append(run_first_fit(N, S, EP, args.seed, TOPO_SEED))
+    results.append(run_first_fit(N, S, EP, args.seed, TOPO_SEED,
+                                 max_nodes=args.max_nodes, max_services=args.max_services))
     r = results[-1]
     print(f"        Mean: {r['mean']:.2f} ± {r['std']:.2f} | "
           f"Placed: {r['placed_mean']*100:.1f}%")
@@ -1109,7 +1163,8 @@ if __name__ == "__main__":
     # ── Baseline Least-Loaded ────────────────────────────────────────────────
     print(f"\n  [3/{total_steps}] Least-Loaded baseline...")
     labels.append("Least-Loaded")
-    results.append(run_least_loaded(N, S, EP, args.seed, TOPO_SEED))
+    results.append(run_least_loaded(N, S, EP, args.seed, TOPO_SEED,
+                                    max_nodes=args.max_nodes, max_services=args.max_services))
     r = results[-1]
     print(f"        Mean: {r['mean']:.2f} ± {r['std']:.2f} | "
         f"Placed: {r['placed_mean']*100:.1f}%")
@@ -1117,7 +1172,8 @@ if __name__ == "__main__":
     # ── Baseline Round-Robin ─────────────────────────────────────────────────
     print(f"\n  [4/{total_steps}] Round-Robin baseline...")
     labels.append("Round-Robin")
-    results.append(run_round_robin(N, S, EP, args.seed, TOPO_SEED))
+    results.append(run_round_robin(N, S, EP, args.seed, TOPO_SEED,
+                                   max_nodes=args.max_nodes, max_services=args.max_services))
     r = results[-1]
     print(f"        Mean: {r['mean']:.2f} ± {r['std']:.2f} | "
         f"Placed: {r['placed_mean']*100:.1f}%")
@@ -1132,7 +1188,8 @@ if __name__ == "__main__":
         try:
             labels.append(agent_names[name])
             results.append(
-                run_ai_agent(name, model_path, N, S, EP, args.seed, TOPO_SEED)
+                run_ai_agent(name, model_path, N, S, EP, args.seed, TOPO_SEED,
+                             max_nodes=args.max_nodes, max_services=args.max_services)
             )
             r = results[-1]
             print(f"        Mean: {r['mean']:.2f} ± {r['std']:.2f} | "

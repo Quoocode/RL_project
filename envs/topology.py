@@ -62,10 +62,17 @@ class Node:
         self.memory_used = 0.0
 
     def reset(self):
-        """Reset node về trạng thái ban đầu."""
-        self.is_active = True
+        """Reset node về trạng thái ban đầu.
+
+        Nếu node là padding (capacity == 0.0) thì giữ `is_active=False`.
+        """
         self.cpu_used = 0.0
         self.memory_used = 0.0
+        if self.cpu_capacity == 0.0 and self.memory_capacity == 0.0:
+            # padding node — keep inactive
+            self.is_active = False
+        else:
+            self.is_active = True
 
 
 @dataclass
@@ -262,13 +269,35 @@ class NetworkTopology:
         for node in self.nodes:
             node.reset()
 
-def create_sample_topology(num_nodes: int = 5) -> NetworkTopology:
+def create_sample_topology(actual_num_nodes: int = 5, max_nodes: int = None) -> NetworkTopology:
     """
     Tạo topology mẫu cho môi trường mô phỏng.
 
-    Env v2 mặc định dùng heterogeneous nodes.
+    - `actual_num_nodes`: số node thực tế trong scenario (ví dụ 5).
+    - `max_nodes`: nếu cung cấp và lớn hơn `actual_num_nodes`, hàm sẽ
+      tạo topology với `max_nodes` nodes nhưng đánh dấu các node có id
+      >= actual_num_nodes là inactive và đặt capacity = 0.0 để chúng
+      đóng vai trò padding.
+
+    Trả về `NetworkTopology` có số node bằng `max_nodes` nếu được chỉ
+    định, hoặc `actual_num_nodes` nếu không.
     """
-    return NetworkTopology(num_nodes)
+
+    total = max_nodes if (max_nodes is not None and max_nodes > actual_num_nodes) else actual_num_nodes
+    topo = NetworkTopology(total)
+
+    # Mark padding nodes (if any) as inactive and zero-capacity so they
+    # won't affect normalization calculations.
+    if total > actual_num_nodes:
+        for i in range(actual_num_nodes, total):
+            node = topo.nodes[i]
+            node.is_active = False
+            node.cpu_capacity = 0.0
+            node.memory_capacity = 0.0
+            node.cpu_used = 0.0
+            node.memory_used = 0.0
+
+    return topo
 
 def create_sample_service_chain(num_services: int = 5, seed=None) -> ServiceChain:
     """

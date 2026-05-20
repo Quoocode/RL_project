@@ -24,6 +24,7 @@ from stable_baselines3.common.monitor import Monitor
 from agents.ppo_agent import PlacementCallback, set_global_seed
 
 from envs.k8s_env import K8sPlacementEnv
+from envs.k8s_env import K8sPlacementEnvDynamic
 
 
 class DQNAgent:
@@ -32,6 +33,13 @@ class DQNAgent:
     def __init__(self, env, seed: int = 42, tensorboard_log: str = "./logs/dqn"):
         self.env  = env
         self.seed = seed
+
+        # Disable tensorboard logging if tensorboard not available
+        try:
+            import tensorboard  # type: ignore
+            tb_log = tensorboard_log
+        except Exception:
+            tb_log = None
 
         self.model = DQN(
             policy                 = "MlpPolicy",
@@ -46,7 +54,7 @@ class DQNAgent:
             exploration_final_eps  = 0.05,  # Sau đó giữ 5% random
             verbose                = 0,
             seed                   = seed,
-            tensorboard_log        = tensorboard_log,
+            tensorboard_log        = tb_log,
         )
 
     @classmethod
@@ -108,6 +116,8 @@ def parse_args():
     parser.add_argument("--seed",         type=int, default=42)
     parser.add_argument("--nodes",        type=int, default=5)
     parser.add_argument("--services",     type=int, default=5)
+    parser.add_argument("--max-nodes",    type=int, default=None)
+    parser.add_argument("--max-services", type=int, default=None)
     parser.add_argument("--save",         type=str, default="./models/dqn_model")
     parser.add_argument("--resume",       type=str, default=None)
     parser.add_argument("--log-dir",      type=str, default="./logs/dqn")
@@ -120,7 +130,15 @@ if __name__ == "__main__":
 
     set_global_seed(args.seed)
 
-    env = K8sPlacementEnv(num_nodes=args.nodes, num_services=args.services)
+    if args.max_nodes is not None or args.max_services is not None:
+        env = K8sPlacementEnvDynamic(
+            actual_num_nodes=args.nodes,
+            actual_num_services=args.services,
+            max_nodes=args.max_nodes or args.nodes,
+            max_services=args.max_services or args.services,
+        )
+    else:
+        env = K8sPlacementEnv(num_nodes=args.nodes, num_services=args.services)
     env = Monitor(env, filename=None)
     env.reset(seed=args.seed)
 

@@ -13,7 +13,7 @@ import traceback
 import numpy as np
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-from envs.k8s_env import K8sPlacementEnv
+from envs.k8s_env import K8sPlacementEnv, K8sPlacementEnvDynamic
 
 # ═════════════════════════════════════════════════════════════════════════════
 # HELPER
@@ -49,6 +49,11 @@ def section(title: str):
 
 def make_env(seed=42, **kwargs) -> K8sPlacementEnv:
     env = K8sPlacementEnv(**kwargs)
+    env.reset(seed=seed)
+    return env
+
+def make_dynamic_env(seed=42, **kwargs) -> K8sPlacementEnvDynamic:
+    env = K8sPlacementEnvDynamic(**kwargs)
     env.reset(seed=seed)
     return env
 
@@ -327,6 +332,52 @@ def t_reset_clears_state():
 run_test("same_seed_same_result", t_same_seed_same_result)
 run_test("diff_seed_diff_result", t_diff_seed_diff_result)
 run_test("reset_clears_state",    t_reset_clears_state)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# NHÓM DYNAMIC — Tests cho K8sPlacementEnvDynamic
+# ═════════════════════════════════════════════════════════════════════════════
+section("NHÓM DYNAMIC — Observation shape và Invalid Actions")
+
+def t_dynamic_obs_shape_consistent():
+    e1 = make_dynamic_env(actual_num_nodes=5, actual_num_services=5)
+    e2 = make_dynamic_env(actual_num_nodes=5, actual_num_services=8)
+    e3 = make_dynamic_env(actual_num_nodes=8, actual_num_services=10)
+
+    o1, _ = e1.reset()
+    o2, _ = e2.reset()
+    o3, _ = e3.reset()
+
+    assert o1.shape == o2.shape == o3.shape, \
+        f"Dynamic obs shape không giống nhau: {o1.shape}, {o2.shape}, {o3.shape}"
+
+    # đồng thời so sánh với observation_space
+    assert o1.shape == e1.observation_space.shape, \
+        f"Obs shape không trùng với observation_space: {o1.shape} vs {e1.observation_space.shape}"
+
+def t_dynamic_invalid_action_padding_node():
+    env = make_dynamic_env(actual_num_nodes=5, actual_num_services=5)
+    _, _ = env.reset()
+    # chọn node padding (>=5), ví dụ 7
+    obs, reward, terminated, truncated, info = env.step(7)
+    assert info.get("invalid_action", False) is True, "invalid_action phải True khi chọn padding node"
+    assert info.get("invalid_reason") == "padding_node", \
+        f"invalid_reason sai: got {info.get('invalid_reason')}"
+    assert reward == -50.0, f"Reward sai cho padding_node: got {reward}, expected -50.0"
+
+def t_dynamic_invalid_action_inactive_node():
+    env = make_dynamic_env(actual_num_nodes=5, actual_num_services=5)
+    env.reset()
+    # đánh sập node 2
+    env.topology.nodes[2].fail()
+    obs, reward, terminated, truncated, info = env.step(2)
+    assert info.get("invalid_action", False) is True
+    assert info.get("invalid_reason") == "inactive_node"
+    assert reward == -50.0
+
+run_test("dynamic_obs_shape_consistent", t_dynamic_obs_shape_consistent)
+run_test("dynamic_invalid_padding_node", t_dynamic_invalid_action_padding_node)
+run_test("dynamic_invalid_inactive_node", t_dynamic_invalid_action_inactive_node)
 
 
 # ═════════════════════════════════════════════════════════════════════════════

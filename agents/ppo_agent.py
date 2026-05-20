@@ -23,7 +23,7 @@ from stable_baselines3 import PPO
 from stable_baselines3.common.callbacks import BaseCallback
 from stable_baselines3.common.monitor import Monitor
 
-from envs.k8s_env import K8sPlacementEnv
+from envs.k8s_env import K8sPlacementEnv, K8sPlacementEnvDynamic
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -91,6 +91,13 @@ class PPOAgent:
         self.env = env
         self.seed = seed
 
+        # Disable tensorboard logging if tensorboard package is not available
+        try:
+            import tensorboard  # type: ignore
+            tb_log = tensorboard_log
+        except Exception:
+            tb_log = None
+
         self.model = PPO(
             policy          = "MlpPolicy",
             env             = env,
@@ -104,7 +111,7 @@ class PPOAgent:
             ent_coef        = 0.01,
             verbose         = 0,
             seed            = seed,         # ← seed cho SB3 / torch
-            tensorboard_log = tensorboard_log,
+            tensorboard_log = tb_log,
         )
 
     @classmethod
@@ -184,6 +191,10 @@ def parse_args():
                         help="Số node trong cluster (default: 5)")
     parser.add_argument("--services",  type=int,   default=5,
                         help="Số microservice trong chain (default: 5)")
+    parser.add_argument("--max-nodes", type=int,   default=None,
+                        help="Max nodes (for dynamic env padding). If set, use dynamic env")
+    parser.add_argument("--max-services", type=int, default=None,
+                        help="Max services (for dynamic env padding). If set, use dynamic env")
     parser.add_argument("--save",      type=str,   default="./models/ppo_model",
                         help="Đường dẫn lưu model (default: ./models/ppo_model)")
     parser.add_argument("--resume",    type=str,   default=None,
@@ -202,10 +213,20 @@ if __name__ == "__main__":
     set_global_seed(args.seed)
 
     # 2. Tạo môi trường, bọc Monitor để Tensorboard có đủ dữ liệu
-    env = K8sPlacementEnv(
-        num_nodes    = args.nodes,
-        num_services = args.services,
-    )
+    if args.max_nodes is not None or args.max_services is not None:
+        max_n = args.max_nodes or args.nodes
+        max_s = args.max_services or args.services
+        env = K8sPlacementEnvDynamic(
+            actual_num_nodes=args.nodes,
+            actual_num_services=args.services,
+            max_nodes=max_n,
+            max_services=max_s,
+        )
+    else:
+        env = K8sPlacementEnv(
+            num_nodes=args.nodes,
+            num_services=args.services,
+        )
     env = Monitor(env, filename=None)  # filename=None → không ghi file .csv
     env.reset(seed=args.seed)
 

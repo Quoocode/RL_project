@@ -21,11 +21,12 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 import argparse
 import time
 import traceback
+import subprocess
 import numpy as np
 
 from stable_baselines3.common.monitor import Monitor
 
-from envs.k8s_env import K8sPlacementEnv
+from envs.k8s_env import K8sPlacementEnv, K8sPlacementEnvDynamic
 from agents.ppo_agent import PPOAgent, set_global_seed
 from agents.dqn_agent import DQNAgent
 from agents.a2c_agent import A2CAgent
@@ -35,12 +36,21 @@ from agents.a2c_agent import A2CAgent
 # EVALUATION
 # ═════════════════════════════════════════════════════════════════════════════
 def evaluate_agent(agent, num_nodes: int, num_services: int,
-                   n_episodes: int = 10, seed: int = 42) -> dict:
+                   n_episodes: int = 10, seed: int = 42,
+                   max_nodes: int = None, max_services: int = None) -> dict:
     """
     Chạy agent (deterministic) qua n_episodes episode và trả về thống kê.
     Tạo env riêng để eval, không ảnh hưởng env đang train.
     """
-    eval_env = K8sPlacementEnv(num_nodes=num_nodes, num_services=num_services)
+    if max_nodes is not None or max_services is not None:
+        eval_env = K8sPlacementEnvDynamic(
+            actual_num_nodes=num_nodes,
+            actual_num_services=num_services,
+            max_nodes=max_nodes or num_nodes,
+            max_services=max_services or num_services,
+        )
+    else:
+        eval_env = K8sPlacementEnv(num_nodes=num_nodes, num_services=num_services)
     eval_env = Monitor(eval_env, filename=None)
 
     rewards      = []
@@ -78,12 +88,16 @@ AGENT_MAP = {
     "a2c": (A2CAgent, "./logs/a2c", "./models/a2c_model"),
 }
 
-def train_one(name: str, args) -> dict | None:
+def train_one(name: str, args, save_override: str | None = None, log_override: str | None = None) -> dict | None:
     """
     Train một agent, eval sau khi xong, trả về kết quả.
     Bắt exception để nếu 1 agent lỗi, các agent khác vẫn chạy tiếp.
     """
     AgentClass, log_dir, save_path = AGENT_MAP[name]
+    if save_override:
+        save_path = save_override
+    if log_override:
+        log_dir = log_override
 
     print(f"\n{'#'*55}")
     print(f"#  [{name.upper()}] BẮT ĐẦU")
@@ -92,7 +106,15 @@ def train_one(name: str, args) -> dict | None:
     try:
         # Tạo env mới cho mỗi agent — seed cố định để so sánh công bằng
         set_global_seed(args.seed)
-        env = K8sPlacementEnv(num_nodes=args.nodes, num_services=args.services)
+        if getattr(args, 'max_nodes', None) is not None or getattr(args, 'max_services', None) is not None:
+            env = K8sPlacementEnvDynamic(
+                actual_num_nodes=args.nodes,
+                actual_num_services=args.services,
+                max_nodes=(args.max_nodes or args.nodes),
+                max_services=(args.max_services or args.services),
+            )
+        else:
+            env = K8sPlacementEnv(num_nodes=args.nodes, num_services=args.services)
         env = Monitor(env, filename=None)
         env.reset(seed=args.seed)
 
@@ -114,6 +136,8 @@ def train_one(name: str, args) -> dict | None:
             num_services = args.services,
             n_episodes   = args.eval_episodes,
             seed         = args.seed + 1000,   # Seed khác để tránh trùng train
+            max_nodes    = args.max_nodes,
+            max_services = args.max_services,
         )
         stats["train_time"] = train_time
         stats["status"]     = "OK"
@@ -177,11 +201,28 @@ def print_summary(results: dict, args):
 
     print(f"\n  Xem chi tiết trên Tensorboard:")
     for name in results:
-        _, log_dir, _ = AGENT_MAP[name]
-        print(f"    tensorboard --logdir {log_dir}   ({name.upper()})")
+        base = name.split('_')[0]
+        if base in AGENT_MAP:
+            _, log_dir, _ = AGENT_MAP[base]
+            print(f"    tensorboard --logdir {log_dir}   ({name.upper()})")
+        else:
+            print(f"    tensorboard --logdir ./logs   ({name.upper()})")
     print(f"  Hoặc so sánh tất cả cùng lúc:")
     trained = list(results.keys())
-    log_arg = ",".join(f"{n}:{AGENT_MAP[n][1]}" for n in trained)
+    # Build a logdir spec using base agent names (handle seeded keys like 'dqn_seed42')
+    log_items = []
+    seen = set()
+    for n in trained:
+        base = n.split('_')[0]
+        if base in AGENT_MAP and base not in seen:
+            log_items.append(f"{base}:{AGENT_MAP[base][1]}")
+            seen.add(base)
+        elif base not in seen:
+            # fallback to generic logs dir
+            log_items.append(f"{base}:./logs")
+            seen.add(base)
+
+    log_arg = ",".join(log_items)
     print(f"    tensorboard --logdir_spec {log_arg}")
     print(f"{'═'*65}\n")
 
@@ -199,16 +240,28 @@ def parse_args():
     )
     parser.add_argument("--timesteps",      type=int, default=100_000,
                         help="Timestep mỗi agent (default: 100000)")
+    parser.add_argument("--seeds", nargs='+', type=int, default=None,
+                        help="Danh sách seeds để chạy nhiều lần (ví dụ: 42 123 456)")
     parser.add_argument("--seed",           type=int, default=42,
                         help="Random seed (default: 42)")
     parser.add_argument("--nodes",          type=int, default=5,
                         help="Số node (default: 5)")
     parser.add_argument("--services",       type=int, default=5,
                         help="Số services (default: 5)")
+    parser.add_argument("--max-nodes",      type=int, default=None,
+                        help="Max nodes for dynamic env (optional)")
+    parser.add_argument("--max-services",   type=int, default=None,
+                        help="Max services for dynamic env (optional)")
     parser.add_argument("--eval-episodes",  type=int, default=10,
                         help="Số episode eval sau train (default: 10)")
     parser.add_argument("--log-interval",   type=int, default=100,
                         help="In terminal mỗi N episode (default: 100)")
+    parser.add_argument("--export-training-plots", action="store_true",
+                        help="Xuất biểu đồ hội tụ từ TensorBoard logs sau khi train")
+    parser.add_argument("--plots-outdir", type=str, default="./results/training_plots",
+                        help="Thư mục lưu biểu đồ hội tụ (default: ./results/training_plots)")
+    parser.add_argument("--smooth-window", type=int, default=25,
+                        help="Cửa sổ moving-average cho plot train (default: 25)")
     return parser.parse_args()
 
 
@@ -230,11 +283,44 @@ if __name__ == "__main__":
     results = {}
     total_t0 = time.time()
 
-    for name in args.agents:
-        results[name] = train_one(name, args)
+    # Support multi-seed runs
+    if args.seeds:
+        for name in args.agents:
+            for s in args.seeds:
+                print(f"\n--- Running {name.upper()} with seed={s} ---")
+                # construct per-seed save/log paths
+                _, base_log_dir, base_save = AGENT_MAP[name]
+                seed_log = os.path.join(base_log_dir, f"seed_{s}")
+                seed_save = f"{base_save}_seed{s}"
+                # modify args.seed for this run
+                args.seed = s
+                res = train_one(name, args, save_override=seed_save, log_override=seed_log)
+                results[f"{name}_seed{s}"] = res
+    else:
+        for name in args.agents:
+            results[name] = train_one(name, args)
 
     total_time = time.time() - total_t0
     mins, secs = divmod(int(total_time), 60)
     print(f"\n  Tổng thời gian: {mins}m{secs:02d}s")
 
     print_summary(results, args)
+
+    if args.export_training_plots:
+        os.makedirs(args.plots_outdir, exist_ok=True)
+        cmd = [
+            sys.executable,
+            "scripts/analysis_plots.py",
+            "--mode", "training",
+            "--log-root", "./logs",
+            "--outdir", args.plots_outdir,
+            "--smooth-window", str(max(1, args.smooth_window)),
+            "--agents",
+        ] + args.agents
+
+        print("\n  Đang xuất training plots từ TensorBoard logs...")
+        try:
+            subprocess.run(cmd, check=True)
+            print(f"  ✅ Đã xuất plots tại: {args.plots_outdir}")
+        except Exception as e:
+            print(f"  ⚠️  Không xuất được training plots: {e}")

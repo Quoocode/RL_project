@@ -38,19 +38,16 @@ import numpy as np
 from dataclasses import dataclass
 from typing import List, Optional
 
+from envs.topology import create_sample_service_chain, SERVICE_PROFILES
+
 
 # ═════════════════════════════════════════════════════════════════════════════
 # CONFIG — khớp với cluster thật
 # ═════════════════════════════════════════════════════════════════════════════
 
-# 5 worker nodes (bỏ control-plane minikube)
-WORKER_NODES = [
-    "gke-rl-placement-cluster-default-pool-566738bc-5kfd",
-    "gke-rl-placement-cluster-default-pool-566738bc-9xx7",
-    "gke-rl-placement-cluster-default-pool-566738bc-jc5z",
-    "gke-rl-placement-cluster-default-pool-566738bc-v3j0",
-    "gke-rl-placement-cluster-default-pool-566738bc-vpqn",
-]
+# 5 worker nodes (bỏ control-plane). Nếu không truyền danh sách node,
+# script sẽ tự đọc từ kubectl và lấy 5 node worker đầu tiên.
+WORKER_NODES: List[str] = []
 
 # Capacity thật (từ kubectl get nodes)
 NODE_CPU_CAPACITY_CORES = 0.94
@@ -61,8 +58,50 @@ NUM_NODES     = 5   # số worker nodes
 NUM_SERVICES  = 5   # số services trong chain
 # obs_dim = NUM_NODES*2 + 2 + NUM_SERVICES = 17
 
+# Model DQN hiện tại được train trên format dynamic 8-node / 10-service,
+# nên observation thực tế phải được pad về đúng shape 208.
+OBS_MAX_NODES = 8
+OBS_MAX_SERVICES = 10
+OBS_NODE_FEAT_DIM = 5
+OBS_SERVICE_FEAT_DIM = 4
+OBS_OBS_DIM = (
+    OBS_MAX_NODES * OBS_NODE_FEAT_DIM +
+    OBS_MAX_SERVICES * OBS_SERVICE_FEAT_DIM +
+    (OBS_MAX_SERVICES * OBS_MAX_SERVICES) +
+    OBS_MAX_SERVICES +
+    OBS_MAX_NODES +
+    OBS_MAX_SERVICES
+)
+
 # Namespace riêng để không ảnh hưởng cluster
 K8S_NAMESPACE = "drl-scheduler"
+
+
+def discover_worker_nodes(expected_count: int = NUM_NODES) -> List[str]:
+    """Tự động phát hiện worker nodes từ kubectl, loại control-plane/master."""
+    result = subprocess.run(
+        ["kubectl", "get", "nodes", "-o", "name"],
+        capture_output=True, text=True, timeout=10
+    )
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or "kubectl get nodes failed")
+
+    discovered = []
+    for line in result.stdout.splitlines():
+        name = line.replace("node/", "").strip()
+        if not name:
+            continue
+        lower_name = name.lower()
+        if "master" in lower_name or "control-plane" in lower_name:
+            continue
+        discovered.append(name)
+
+    discovered = sorted(discovered)
+    if len(discovered) < expected_count:
+        raise RuntimeError(
+            f"Chỉ tìm thấy {len(discovered)} worker nodes, cần tối thiểu {expected_count}."
+        )
+    return discovered[:expected_count]
 
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -91,6 +130,8 @@ class ServiceRequest:
     name: str
     cpu_cores: float   # vd: 0.5 = 500m
     mem_mb: float      # vd: 512
+    service_type: str = "balanced"
+    placed_on: int = -1
     image: str = "nginx:alpine"
 
 
@@ -100,6 +141,9 @@ class ServiceRequest:
 
 class RealClusterObserver:
     """Đọc CPU/RAM usage thật của 5 worker nodes qua kubectl top nodes."""
+
+    def __init__(self, worker_nodes: List[str]):
+        self.worker_nodes = worker_nodes
 
     def get_metrics(self) -> List[NodeMetrics]:
         """
@@ -122,7 +166,7 @@ class RealClusterObserver:
                 if len(parts) < 4:
                     continue
                 name = parts[0]
-                if name not in WORKER_NODES:
+                if name not in self.worker_nodes:
                     continue
 
                 # Parse CPU
@@ -145,56 +189,98 @@ class RealClusterObserver:
 
                 metrics_map[name] = NodeMetrics(name, cpu_cores, mem_mb)
 
-            # Trả về đúng thứ tự WORKER_NODES
+            # Trả về đúng thứ tự worker nodes đã phát hiện
             return [
                 metrics_map.get(n, NodeMetrics(n, 0.0, 0.0))
-                for n in WORKER_NODES
+                for n in self.worker_nodes
             ]
 
         except Exception as e:
             print(f"  ⚠️  Không đọc được metrics ({e}), dùng 0%")
-            return [NodeMetrics(n, 0.0, 0.0) for n in WORKER_NODES]
+            return [NodeMetrics(n, 0.0, 0.0) for n in self.worker_nodes]
 
     def build_observation(self, metrics: List[NodeMetrics],
                           service: ServiceRequest,
                           service_idx: int,
+                          services: List[ServiceRequest],
+                          dependency_edges: list = None,
                           session_cpu: dict = None,
                           session_mem: dict = None) -> np.ndarray:
         """
-        Chuyển metrics thật → obs vector 17-dim.
+        Chuyển metrics thật → obs vector 208-dim theo format train.
 
-        FIX: metrics-server chỉ update mỗi 15-60s nên sau khi deploy
-        một pod, kubectl top nodes vẫn báo số cũ. Ta cộng thêm
-        resource đã deploy trong session hiện tại để agent thấy
-        utilization tích lũy đúng hơn.
+        Format khớp với env train:
+        - node features: 8 * 5
+        - service features: 10 * 4
+        - dependency matrix: 10 * 10
+        - current service onehot: 10
+        - valid node mask: 8
+        - valid service mask: 10
 
-        Format (khớp với k8s_env.py đã train):
-        [cpu_util_0, mem_util_0, ..., cpu_util_4, mem_util_4,   # 10 dims
-         cpu_req_norm, mem_req_norm,                              #  2 dims
-         onehot_0, ..., onehot_4]                                #  5 dims
+        Ở môi trường thật chỉ có 5 node và 5 service, nên 3 node cuối
+        và 5 service cuối sẽ được padding bằng 0.
         """
         obs = []
         session_cpu = session_cpu or {}
         session_mem = session_mem or {}
+        dependency_edges = dependency_edges or []
 
-        # Node utilization — cộng thêm resource đã deploy trong session
-        for m in metrics:
-            extra_cpu = session_cpu.get(m.name, 0.0)
-            extra_mem = session_mem.get(m.name, 0.0)
-            adj_cpu = min((m.cpu_used_cores + extra_cpu) / m.cpu_capacity, 1.0)
-            adj_mem = min((m.mem_used_mb   + extra_mem) / m.mem_capacity, 1.0)
-            obs.append(float(adj_cpu))
-            obs.append(float(adj_mem))
+        # Node features: available_cpu_norm, available_mem_norm,
+        # cpu_cap_norm, mem_cap_norm, is_active
+        for i in range(OBS_MAX_NODES):
+            if i < len(metrics):
+                m = metrics[i]
+                extra_cpu = session_cpu.get(m.name, 0.0)
+                extra_mem = session_mem.get(m.name, 0.0)
+                used_cpu = min(m.cpu_used_cores + extra_cpu, m.cpu_capacity)
+                used_mem = min(m.mem_used_mb + extra_mem, m.mem_capacity)
+                available_cpu_norm = float(np.clip((m.cpu_capacity - used_cpu) / m.cpu_capacity, 0.0, 1.0))
+                available_mem_norm = float(np.clip((m.mem_capacity - used_mem) / m.mem_capacity, 0.0, 1.0))
+                cpu_cap_norm = 1.0
+                mem_cap_norm = 1.0
+                is_active = 1.0
+                obs.extend([
+                    available_cpu_norm,
+                    available_mem_norm,
+                    cpu_cap_norm,
+                    mem_cap_norm,
+                    is_active,
+                ])
+            else:
+                obs.extend([0.0, 0.0, 0.0, 0.0, 0.0])
 
-        # Service resource request — normalize về [0,1]
-        obs.append(min(service.cpu_cores / 2.0, 1.0))
-        obs.append(min(service.mem_mb / 4096.0, 1.0))
+        # Service features: cpu_req_norm, mem_req_norm, service_type_id_norm, is_placed
+        profile_names = list(SERVICE_PROFILES.keys())
+        for i in range(OBS_MAX_SERVICES):
+            if i < len(services):
+                svc = services[i]
+                cpu_req_norm = float(np.clip(svc.cpu_cores / 2.0, 0.0, 1.0))
+                mem_req_norm = float(np.clip(svc.mem_mb / 4096.0, 0.0, 1.0))
+                type_idx = profile_names.index(svc.service_type) if svc.service_type in profile_names else 0
+                service_type_id_norm = float(type_idx) / float(max(1, len(profile_names)))
+                is_placed = 1.0 if svc.placed_on >= 0 else 0.0
+                obs.extend([cpu_req_norm, mem_req_norm, service_type_id_norm, is_placed])
+            else:
+                obs.extend([0.0, 0.0, 0.0, 0.0])
 
-        # One-hot service index (5 dims)
-        onehot = [0.0] * NUM_SERVICES
-        if service_idx < NUM_SERVICES:
-            onehot[service_idx] = 1.0
-        obs.extend(onehot)
+        # Dependency matrix (10 x 10)
+        dep_mat = np.zeros((OBS_MAX_SERVICES, OBS_MAX_SERVICES), dtype=np.float32)
+        for edge in dependency_edges:
+            if edge.src < OBS_MAX_SERVICES and edge.dst < OBS_MAX_SERVICES:
+                dep_mat[edge.src][edge.dst] = float(edge.traffic_weight)
+        obs.extend(list(dep_mat.reshape(-1)))
+
+        # current_service_onehot (10)
+        current_onehot = [0.0] * OBS_MAX_SERVICES
+        if service_idx < OBS_MAX_SERVICES:
+            current_onehot[service_idx] = 1.0
+        obs.extend(current_onehot)
+
+        # valid node mask (8)
+        obs.extend([1.0] * min(len(metrics), OBS_MAX_NODES) + [0.0] * max(0, OBS_MAX_NODES - len(metrics)))
+
+        # valid service mask (10)
+        obs.extend([1.0] * min(NUM_SERVICES, OBS_MAX_SERVICES) + [0.0] * max(0, OBS_MAX_SERVICES - NUM_SERVICES))
 
         return np.array(obs, dtype=np.float32)
 
@@ -319,9 +405,13 @@ class RealK8sScheduler:
     sau đó thực thi quyết định trên cluster thật.
     """
 
-    def __init__(self, model_path: str, dry_run: bool = False):
+    def __init__(self, model_path: str, dry_run: bool = False,
+                 worker_nodes: Optional[List[str]] = None):
         self.dry_run  = dry_run
-        self.observer = RealClusterObserver()
+        self.worker_nodes = worker_nodes or discover_worker_nodes()
+        global WORKER_NODES
+        WORKER_NODES = list(self.worker_nodes)
+        self.observer = RealClusterObserver(self.worker_nodes)
         self.executor = KubectlExecutor(dry_run=dry_run)
 
         # Load model — import ở đây để không lỗi nếu SB3 chưa cài
@@ -329,6 +419,23 @@ class RealK8sScheduler:
         print(f"\n  Đang load model: {model_path} ...")
         self.model = DQN.load(model_path)
         print(f"  ✅ Model loaded")
+
+        self.dependency_edges = []
+
+    def make_service_chain(self, service_count: int, seed: int) -> List[ServiceRequest]:
+        chain = create_sample_service_chain(service_count, seed=seed)
+        self.dependency_edges = chain.get_dependencies()
+
+        services: List[ServiceRequest] = []
+        for svc in chain.services:
+            services.append(ServiceRequest(
+                name=svc.name,
+                cpu_cores=float(svc.cpu_request),
+                mem_mb=float(svc.memory_request * 1024.0),
+                service_type=svc.service_type,
+                image="nginx:alpine",
+            ))
+        return services
 
     def _node_id_to_name(self, node_id: int,
                          metrics: List[NodeMetrics]) -> str:
@@ -375,7 +482,13 @@ class RealK8sScheduler:
 
             # 2. Tạo obs vector — truyền session tracking vào
             obs = self.observer.build_observation(
-                metrics, service, idx, session_cpu, session_mem
+                metrics,
+                service,
+                idx,
+                services,
+                dependency_edges=self.dependency_edges,
+                session_cpu=session_cpu,
+                session_mem=session_mem,
             )
 
             # 3. Agent quyết định
@@ -394,6 +507,7 @@ class RealK8sScheduler:
             if success:
                 session_cpu[node_name] += service.cpu_cores
                 session_mem[node_name] += service.mem_mb
+                service.placed_on = node_id
 
             results.append({
                 "service"  : service.name,
@@ -447,6 +561,8 @@ def parse_args():
                         help="Chạy thử, không deploy thật")
     parser.add_argument("--cleanup",  action="store_true",
                         help="Xóa tất cả pods trong namespace rồi thoát")
+    parser.add_argument("--nodes",    type=str, default="",
+                        help="Danh sách worker nodes phân tách bằng dấu phẩy; nếu bỏ trống sẽ tự phát hiện từ kubectl")
     return parser.parse_args()
 
 
@@ -460,26 +576,17 @@ if __name__ == "__main__":
         ex.delete_all_pods()
         sys.exit(0)
 
-    # Tạo service chain giả lập (resource request ngẫu nhiên)
-    # Trong thực tế, đây sẽ được đọc từ manifest hoặc API
-    np.random.seed(args.seed)
-    services = []
-    for i in range(args.services):
-        cpu = round(np.random.uniform(0.1, 0.5), 2)   # 100m–500m
-        mem = round(np.random.uniform(64, 256))        # 64–256 MB
-        services.append(ServiceRequest(
-            name=f"svc-{i:02d}",
-            cpu_cores=cpu,
-            mem_mb=mem,
-        ))
+    worker_nodes = [n.strip() for n in args.nodes.split(",") if n.strip()] or None
 
-    print(f"\n  Service chain sẽ được schedule:")
-    for svc in services:
-        print(f"    {svc.name}: {svc.cpu_cores} CPU | {svc.mem_mb} MB")
-
-    # Chạy scheduler
     scheduler = RealK8sScheduler(
         model_path=args.model,
         dry_run=args.dry_run,
+        worker_nodes=worker_nodes,
     )
+    services = scheduler.make_service_chain(args.services, args.seed)
+
+    print(f"\n  Service chain sẽ được schedule:")
+    for svc in services:
+        print(f"    {svc.name}: type={svc.service_type} | {svc.cpu_cores:.2f} CPU | {svc.mem_mb:.0f} MB")
+
     scheduler.schedule(services)

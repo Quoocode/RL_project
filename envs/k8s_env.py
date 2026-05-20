@@ -11,7 +11,8 @@ from typing import Tuple, Dict, Optional
 from envs.topology import (
     create_sample_topology,
     create_sample_service_chain,
-    Microservice
+    Microservice,
+    SERVICE_PROFILES,
 )
 
 
@@ -224,6 +225,10 @@ class K8sPlacementEnv(gym.Env):
     # ──────────────────────────────────────────────────────────────────────────
     def _calculate_reward(self, service: Microservice,
                         node_id: int, success: bool) -> float:
+        # Protect against node_id outside current topology (padding action)
+        if node_id is None or node_id < 0 or node_id >= len(self.topology.nodes):
+            return -50.0
+
         node = self.topology.get_node(node_id)
 
         if node is None:
@@ -357,6 +362,27 @@ class K8sPlacementEnv(gym.Env):
 
         return self._get_observation(), reward, terminated, truncated, info
 
+    def reset(self, seed=None, options=None):
+        # Use base reset to create service_chain, clear usages and apply background load
+        obs, info = super().reset(seed=seed, options=options)
+
+        # Ensure padding nodes remain inactive and zero-capacity after reset
+        for i in range(self.actual_num_nodes, self.max_nodes):
+            node = self.topology.nodes[i]
+            node.is_active = False
+            node.cpu_capacity = 0.0
+            node.memory_capacity = 0.0
+            node.cpu_used = 0.0
+            node.memory_used = 0.0
+
+        # Recompute normalization denominators
+        cpu_caps = [n.cpu_capacity for n in self.topology.nodes if n.cpu_capacity > 0]
+        mem_caps = [n.memory_capacity for n in self.topology.nodes if n.memory_capacity > 0]
+        self.max_node_cpu_capacity = max(cpu_caps) if cpu_caps else 1.0
+        self.max_node_mem_capacity = max(mem_caps) if mem_caps else 1.0
+
+        return self._get_observation(), info
+
     # ──────────────────────────────────────────────────────────────────────────
     # RESET
     # ──────────────────────────────────────────────────────────────────────────
@@ -394,6 +420,223 @@ class K8sPlacementEnv(gym.Env):
                   if s.placed_on >= 0]
         print(f"  Đã đặt: {placed}")
 
+
+# -----------------------------------------------------------------------------
+# Dynamic env: padded observation/action for up to MAX_NODES x MAX_SERVICES
+# -----------------------------------------------------------------------------
+class K8sPlacementEnvDynamic(K8sPlacementEnv):
+    """
+    Dynamic-size environment that pads observations/actions to a fixed
+    maximum: `max_nodes` and `max_services` (default 8 x 10).
+
+    This class reuses the existing topology/service generation for the
+    *actual* counts, but exposes an observation/action space sized for
+    the maximums and provides masks/padding as described in
+    NEXT_STEPS_DYNAMIC_8N10.md.
+    """
+
+    def __init__(self,
+                 actual_num_nodes: int = 5,
+                 actual_num_services: int = 5,
+                 max_nodes: int = 8,
+                 max_services: int = 10,
+                 max_steps: int = 200,
+                 enable_background_load: bool = True,
+                 background_load_level: str = "medium"):
+        # Initialise base env with actual sizes
+        super().__init__(
+            num_nodes=actual_num_nodes,
+            num_services=actual_num_services,
+            max_steps=max_steps,
+            enable_background_load=enable_background_load,
+            background_load_level=background_load_level,
+        )
+
+        # Keep explicit fields for actual vs max
+        self.actual_num_nodes = actual_num_nodes
+        self.actual_num_services = actual_num_services
+        self.max_nodes = max_nodes
+        self.max_services = max_services
+
+        # Action space always Discrete(max_nodes)
+        self.action_space = spaces.Discrete(self.max_nodes)
+
+        # Precompute observation dim per design from NEXT_STEPS_DYNAMIC_8N10.md
+        node_feat_dim = 5   # available_cpu_norm, available_mem_norm, cpu_cap_norm, mem_cap_norm, is_active
+        svc_feat_dim = 4    # cpu_req_norm, mem_req_norm, service_type_id_norm, is_placed
+
+        obs_dim = (
+            self.max_nodes * node_feat_dim +
+            self.max_services * svc_feat_dim +
+            (self.max_services * self.max_services) +
+            self.max_services +  # current_service_onehot
+            self.max_nodes +     # valid_node_mask
+            self.max_services    # valid_service_mask
+        )
+
+        self.observation_space = spaces.Box(
+            low=0.0, high=1.0, shape=(obs_dim,), dtype=np.float32
+        )
+
+        # Recreate topology with padding nodes up to max_nodes so that
+        # downstream code can inspect a fixed-size `topology.nodes` list.
+        from envs.topology import create_sample_topology
+        self.topology = create_sample_topology(self.actual_num_nodes, max_nodes=self.max_nodes)
+
+        # Recompute normalization denominators based on the new topology
+        cpu_caps = [n.cpu_capacity for n in self.topology.nodes if n.cpu_capacity > 0]
+        mem_caps = [n.memory_capacity for n in self.topology.nodes if n.memory_capacity > 0]
+        self.max_node_cpu_capacity = max(cpu_caps) if cpu_caps else 1.0
+        self.max_node_mem_capacity = max(mem_caps) if mem_caps else 1.0
+
+    def _build_dependency_matrix(self):
+        mat = np.zeros((self.max_services, self.max_services), dtype=np.float32)
+        if not hasattr(self.service_chain, "get_dependencies"):
+            return mat
+
+        for edge in self.service_chain.get_dependencies():
+            if edge.src >= self.actual_num_services or edge.dst >= self.actual_num_services:
+                continue
+            mat[edge.src][edge.dst] = float(edge.traffic_weight) * 1.0
+
+        return mat
+
+    def _get_observation(self) -> np.ndarray:
+        obs = []
+
+        # Node features (pad to max_nodes)
+        for i in range(self.max_nodes):
+            if i < self.actual_num_nodes:
+                node = self.topology.nodes[i]
+                cpu_available = node.cpu_available
+                mem_available = node.memory_available
+                available_cpu_norm = cpu_available / self.max_node_cpu_capacity if self.max_node_cpu_capacity > 0 else 0.0
+                available_mem_norm = mem_available / self.max_node_mem_capacity if self.max_node_mem_capacity > 0 else 0.0
+                cpu_cap_norm = node.cpu_capacity / self.max_node_cpu_capacity if self.max_node_cpu_capacity > 0 else 0.0
+                mem_cap_norm = node.memory_capacity / self.max_node_mem_capacity if self.max_node_mem_capacity > 0 else 0.0
+                is_active = 1.0 if node.is_active else 0.0
+                obs.extend([
+                    float(np.clip(available_cpu_norm, 0.0, 1.0)),
+                    float(np.clip(available_mem_norm, 0.0, 1.0)),
+                    float(np.clip(cpu_cap_norm, 0.0, 1.0)),
+                    float(np.clip(mem_cap_norm, 0.0, 1.0)),
+                    float(is_active),
+                ])
+            else:
+                # padding node
+                obs.extend([0.0, 0.0, 0.0, 0.0, 0.0])
+
+        # Service features (pad to max_services)
+        profile_names = list(SERVICE_PROFILES.keys())
+        num_types = len(profile_names)
+        for i in range(self.max_services):
+            if i < self.actual_num_services:
+                svc = self.service_chain.services[i]
+                cpu_req_norm = svc.cpu_request / 2.0
+                mem_req_norm = svc.memory_request / 4.0
+                type_idx = profile_names.index(svc.service_type) if svc.service_type in profile_names else 0
+                service_type_id_norm = float(type_idx) / float(max(1, num_types))
+                is_placed = 1.0 if svc.placed_on >= 0 else 0.0
+                obs.extend([
+                    float(np.clip(cpu_req_norm, 0.0, 1.0)),
+                    float(np.clip(mem_req_norm, 0.0, 1.0)),
+                    float(np.clip(service_type_id_norm, 0.0, 1.0)),
+                    float(is_placed),
+                ])
+            else:
+                obs.extend([0.0, 0.0, 0.0, 0.0])
+
+        # Dependency matrix (max_services x max_services)
+        dep_mat = self._build_dependency_matrix()
+        obs.extend(list(dep_mat.reshape(-1).astype(np.float32)))
+
+        # current_service_onehot (length max_services)
+        onehot = np.zeros(self.max_services, dtype=np.float32)
+        if self.current_service_idx < self.actual_num_services:
+            onehot[self.current_service_idx] = 1.0
+        obs.extend(list(onehot))
+
+        # valid_node_mask (length max_nodes)
+        valid_node_mask = [1.0 if i < self.actual_num_nodes else 0.0 for i in range(self.max_nodes)]
+        obs.extend(valid_node_mask)
+
+        # valid_service_mask (length max_services)
+        valid_service_mask = [1.0 if i < self.actual_num_services else 0.0 for i in range(self.max_services)]
+        obs.extend(valid_service_mask)
+
+        return np.array(obs, dtype=np.float32)
+
+    def step(self, action: int) -> Tuple[np.ndarray, float, bool, bool, Dict]:
+        # Allow action in [0, max_nodes). If action >= actual_num_nodes -> invalid (padding_node)
+        assert self.current_service_idx < self.actual_num_services, \
+            "step() được gọi sau khi episode đã kết thúc — hãy gọi reset() trước."
+
+        self.step_count += 1
+        service = self.service_chain.services[self.current_service_idx]
+
+        invalid_action = False
+        invalid_reason = None
+        success = False
+
+        if action >= self.actual_num_nodes:
+            # padding node selected — treat as invalid with heavy penalty
+            invalid_action = True
+            invalid_reason = "padding_node"
+            node = None
+            reward = -50.0
+            # advance index and return early below after bookkeeping
+            self.current_service_idx += 1
+
+            terminated = self.current_service_idx >= self.actual_num_services
+            truncated = (not terminated) and (self.step_count >= self.max_steps)
+
+            info = {
+                "success": False,
+                "invalid_action": invalid_action,
+                "invalid_reason": invalid_reason,
+                "placed_on_node": -1,
+                "step_count": self.step_count,
+                "placed_total": sum(1 for s in self.service_chain.services if s.placed_on >= 0),
+            }
+
+            return self._get_observation(), reward, terminated, truncated, info
+        else:
+            node = self.topology.get_node(action)
+            if node is None:
+                invalid_action = True
+                invalid_reason = "padding_node"
+            elif not node.is_active:
+                invalid_action = True
+                invalid_reason = "inactive_node"
+            else:
+                # try allocate
+                success = node.allocate(service.cpu_request, service.memory_request)
+                if not success:
+                    invalid_action = True
+                    invalid_reason = "insufficient_resource"
+
+        if success:
+            service.placed_on = action
+
+        # always advance current_service_idx
+        self.current_service_idx += 1
+
+        # Compute reward using base implementation
+        reward = self._calculate_reward(service, action, success)
+
+        terminated = self.current_service_idx >= self.actual_num_services
+        truncated = (not terminated) and (self.step_count >= self.max_steps)
+
+        info = {
+            "success": success,
+            "invalid_action": invalid_action,
+            "invalid_reason": invalid_reason,
+            "placed_on_node": action if success else -1,
+            "step_count": self.step_count,
+            "placed_total": sum(1 for s in self.service_chain.services if s.placed_on >= 0),
+        }
+
+        return self._get_observation(), reward, terminated, truncated, info
 
 # =============================================================================
 # TEST MÔI TRƯỜNG — chạy: python envs/k8s_env.py
