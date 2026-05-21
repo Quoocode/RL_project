@@ -1,0 +1,30 @@
+{
+  "namespace": "drl-scheduler",
+  "node_order": [
+    {
+      "index": 0,
+      "role": "small",
+      "name": "gke-rl-placement-cluster-default-pool-6fbdc003-q9b2"
+    },
+    {
+      "index": 1,
+      "role": "medium",
+      "name": "gke-rl-placement-cluster-medium-pool-eee43eeb-32lc"
+    },
+    {
+      "index": 2,
+      "role": "large",
+      "name": "gke-rl-placement-cluster-large-pool-ba1c40dc-5zc6"
+    },
+    {
+      "index": 3,
+      "role": "medium",
+      "name": "gke-rl-placement-cluster-medium-pool-eee43eeb-6f59"
+    },
+    {
+      "index": 4,
+      "role": "small",
+      "name": "gke-rl-placement-cluster-default-pool-6fbdc003-qwbv"
+    }
+  ]
+}

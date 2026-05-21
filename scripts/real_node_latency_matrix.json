@@ -1,0 +1,105 @@
+{
+  "namespace": "drl-scheduler",
+  "ping_count": 10,
+  "node_order": [
+    {
+      "index": 0,
+      "role": "small",
+      "name": "gke-rl-placement-cluster-default-pool-6fbdc003-q9b2"
+    },
+    {
+      "index": 1,
+      "role": "medium",
+      "name": "gke-rl-placement-cluster-medium-pool-eee43eeb-32lc"
+    },
+    {
+      "index": 2,
+      "role": "large",
+      "name": "gke-rl-placement-cluster-large-pool-ba1c40dc-5zc6"
+    },
+    {
+      "index": 3,
+      "role": "medium",
+      "name": "gke-rl-placement-cluster-medium-pool-eee43eeb-6f59"
+    },
+    {
+      "index": 4,
+      "role": "small",
+      "name": "gke-rl-placement-cluster-default-pool-6fbdc003-qwbv"
+    }
+  ],
+  "pods": [
+    {
+      "index": 0,
+      "pod": "netshoot-node0",
+      "ip": "10.60.0.9",
+      "node": "gke-rl-placement-cluster-default-pool-6fbdc003-q9b2",
+      "role": "small"
+    },
+    {
+      "index": 1,
+      "pod": "netshoot-node1",
+      "ip": "10.60.3.8",
+      "node": "gke-rl-placement-cluster-medium-pool-eee43eeb-32lc",
+      "role": "medium"
+    },
+    {
+      "index": 2,
+      "pod": "netshoot-node2",
+      "ip": "10.60.4.14",
+      "node": "gke-rl-placement-cluster-large-pool-ba1c40dc-5zc6",
+      "role": "large"
+    },
+    {
+      "index": 3,
+      "pod": "netshoot-node3",
+      "ip": "10.60.2.7",
+      "node": "gke-rl-placement-cluster-medium-pool-eee43eeb-6f59",
+      "role": "medium"
+    },
+    {
+      "index": 4,
+      "pod": "netshoot-node4",
+      "ip": "10.60.1.17",
+      "node": "gke-rl-placement-cluster-default-pool-6fbdc003-qwbv",
+      "role": "small"
+    }
+  ],
+  "latency_ms": [
+    [
+      0.0,
+      0.419,
+      0.459,
+      0.396,
+      0.429
+    ],
+    [
+      0.397,
+      0.0,
+      0.432,
+      0.447,
+      0.504
+    ],
+    [
+      0.448,
+      0.471,
+      0.0,
+      0.403,
+      0.489
+    ],
+    [
+      0.454,
+      0.501,
+      0.428,
+      0.0,
+      0.401
+    ],
+    [
+      0.444,
+      0.467,
+      0.502,
+      0.452,
+      0.0
+    ]
+  ]
+}

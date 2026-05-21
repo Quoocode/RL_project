@@ -1,0 +1,84 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: netshoot-node0
+  namespace: drl-scheduler
+  labels:
+    app: latency-test
+    node-index: "0"
+    node-role: "small"
+spec:
+  nodeName: gke-rl-placement-cluster-default-pool-6fbdc003-q9b2
+  restartPolicy: Always
+  containers:
+  - name: netshoot
+    image: nicolaka/netshoot
+    command: ["sleep", "36000"]
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: netshoot-node1
+  namespace: drl-scheduler
+  labels:
+    app: latency-test
+    node-index: "1"
+    node-role: "medium"
+spec:
+  nodeName: gke-rl-placement-cluster-medium-pool-eee43eeb-32lc
+  restartPolicy: Always
+  containers:
+  - name: netshoot
+    image: nicolaka/netshoot
+    command: ["sleep", "36000"]
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: netshoot-node2
+  namespace: drl-scheduler
+  labels:
+    app: latency-test
+    node-index: "2"
+    node-role: "large"
+spec:
+  nodeName: gke-rl-placement-cluster-large-pool-ba1c40dc-5zc6
+  restartPolicy: Always
+  containers:
+  - name: netshoot
+    image: nicolaka/netshoot
+    command: ["sleep", "36000"]
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: netshoot-node3
+  namespace: drl-scheduler
+  labels:
+    app: latency-test
+    node-index: "3"
+    node-role: "medium"
+spec:
+  nodeName: gke-rl-placement-cluster-medium-pool-eee43eeb-6f59
+  restartPolicy: Always
+  containers:
+  - name: netshoot
+    image: nicolaka/netshoot
+    command: ["sleep", "36000"]
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: netshoot-node4
+  namespace: drl-scheduler
+  labels:
+    app: latency-test
+    node-index: "4"
+    node-role: "small"
+spec:
+  nodeName: gke-rl-placement-cluster-default-pool-6fbdc003-qwbv
+  restartPolicy: Always
+  containers:
+  - name: netshoot
+    image: nicolaka/netshoot
+    command: ["sleep", "36000"]
