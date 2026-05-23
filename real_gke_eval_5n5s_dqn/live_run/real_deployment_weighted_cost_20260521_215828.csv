@@ -1,0 +1,6 @@
+"run_id","timestamp","mode","model_path","src","dst","traffic_weight","src_node","dst_node","distance_cost","edge_cost","valid_edges","total_cost"
+"20260521_215828","2026-05-21T21:59:10","live",".\models_env_v3_5n5s\dqn_model.zip","frontend","auth","0.9","gke-rl-placement-cluster-default-pool-fd831fc9-2pvx","gke-rl-placement-cluster-default-pool-fd831fc9-nb98","2.0","1.8","5","6.075"
+"20260521_215828","2026-05-21T21:59:10","live",".\models_env_v3_5n5s\dqn_model.zip","frontend","catalog","0.8","gke-rl-placement-cluster-default-pool-fd831fc9-2pvx","gke-rl-placement-cluster-default-pool-fd831fc9-nb98","2.0","1.6","5","6.075"
+"20260521_215828","2026-05-21T21:59:10","live",".\models_env_v3_5n5s\dqn_model.zip","catalog","payment","0.7","gke-rl-placement-cluster-default-pool-fd831fc9-nb98","gke-rl-placement-cluster-default-pool-fd831fc9-2pvx","2.0","1.4","5","6.075"
+"20260521_215828","2026-05-21T21:59:10","live",".\models_env_v3_5n5s\dqn_model.zip","payment","database","0.95","gke-rl-placement-cluster-default-pool-fd831fc9-2pvx","gke-rl-placement-cluster-default-pool-fd831fc9-2pvx","0.5","0.475","5","6.075"
+"20260521_215828","2026-05-21T21:59:10","live",".\models_env_v3_5n5s\dqn_model.zip","auth","database","0.4","gke-rl-placement-cluster-default-pool-fd831fc9-nb98","gke-rl-placement-cluster-default-pool-fd831fc9-2pvx","2.0","0.8","5","6.075"

@@ -1,0 +1,16 @@
+{
+  "timestamp": "2026-05-23T14:54:10",
+  "agents": [
+    "ppo",
+    "dqn",
+    "a2c"
+  ],
+  "timesteps": 300000,
+  "seed": 12345,
+  "nodes": 5,
+  "services": 8,
+  "eval_episodes": 50,
+  "log_interval": 100,
+  "smooth_window": 100,
+  "experiment_dir": "experiment_5n8s_300k_learning"
+}

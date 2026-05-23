@@ -6,7 +6,7 @@ Kiến trúc:
   Real K8s Cluster
        │  kubectl top nodes
        ▼
-  RealClusterObserver  → obs vector 30-dim (khớp model 5n8s đã train)
+  RealClusterObserver  → obs vector 17-dim (khớp model đã train)
        │  model.predict(obs)
        ▼
   DRL Agent (DQN)      → node_id (0-4)
@@ -24,7 +24,7 @@ Chạy thật:
     python k8s_real_env.py
 
 Chạy nhiều services:
-    python k8s_real_env.py --services 8 --model ./experiment_5n8s_300k/models/dqn_model
+    python k8s_real_env.py --services 5 --model ./models/dqn_model
 """
 
 import sys
@@ -46,12 +46,12 @@ from typing import List, Optional
 # CONFIG — khớp với cluster thật
 # ═════════════════════════════════════════════════════════════════════════════
 
-# Khớp với model DQN env v3 đã train cho kịch bản 5 nodes / 8 services
+# Khớp với model DQN env v3 đã train cho kịch bản 5 nodes / 5 services
 NUM_NODES     = 5
-NUM_SERVICES  = 8
+NUM_SERVICES  = 5
 
 # Env v3 observation:
-# obs_dim = NUM_NODES*4 + 2 + NUM_SERVICES = 30
+# obs_dim = NUM_NODES*4 + 2 + NUM_SERVICES = 27
 EXPECTED_OBS_DIM = (NUM_NODES * 4) + 2 + NUM_SERVICES
 
 # Fallback capacity, chỉ dùng khi không đọc được allocatable.
@@ -62,10 +62,10 @@ DEFAULT_NODE_MEM_CAPACITY_MB    = 1024.0
 # Namespace riêng để không ảnh hưởng cluster
 K8S_NAMESPACE = "drl-scheduler"
 
-RESULTS_DIR = "real_gke_eval_5n8s_dqn"
+RESULTS_DIR = "results"
 REAL_SERVICE_LOG_CSV = os.path.join(RESULTS_DIR, "real_deployment_services.csv")
 REAL_COST_LOG_CSV = os.path.join(RESULTS_DIR, "real_deployment_weighted_cost.csv")
-REAL_SUMMARY_LOG_CSV = os.path.join(RESULTS_DIR, "real_deployment_summary.csv")
+
 
 # ═════════════════════════════════════════════════════════════════════════════
 # DATA CLASSES
@@ -143,15 +143,11 @@ class DependencyEdge:
 
 
 DEMO_DEPENDENCIES = [
-    DependencyEdge("frontend",       "auth",           0.90),
-    DependencyEdge("frontend",       "catalog",        0.85),
-    DependencyEdge("frontend",       "cart",           0.80),
-    DependencyEdge("catalog",        "recommendation", 0.65),
-    DependencyEdge("catalog",        "database",       0.70),
-    DependencyEdge("cart",           "payment",        0.90),
-    DependencyEdge("payment",        "database",       0.95),
-    DependencyEdge("payment",        "shipping",       0.75),
-    DependencyEdge("recommendation", "database",       0.50),
+    DependencyEdge("frontend", "auth",     0.90),
+    DependencyEdge("frontend", "catalog",  0.80),
+    DependencyEdge("catalog",  "payment",  0.70),
+    DependencyEdge("payment",  "database", 0.95),
+    DependencyEdge("auth",     "database", 0.40),
 ]
 
 # ═════════════════════════════════════════════════════════════════════════════
@@ -166,7 +162,7 @@ class RealClusterObserver:
     - Không hard-code node name.
     - Tự discover đúng NUM_NODES node từ cluster hiện tại.
     - Tự đọc allocatable CPU/RAM từ kubectl get nodes -o json.
-    - Build observation 30-dim khớp env v3.
+    - Build observation 27-dim khớp env v3.
     """
 
     def __init__(self, expected_nodes: int = NUM_NODES):
@@ -344,7 +340,7 @@ class RealClusterObserver:
         if len(nodes) != self.expected_nodes:
             raise RuntimeError(
                 f"Expected {self.expected_nodes} Ready nodes for DQN "
-                f"5n8 model, but found {len(nodes)}: {nodes}. "
+                f"5n5 model, but found {len(nodes)}: {nodes}. "
                 f"Create a {self.expected_nodes}-node cluster or use the "
                 f"matching model."
             )
@@ -510,7 +506,7 @@ class RealClusterObserver:
                           session_cpu: dict = None,
                           session_mem: dict = None) -> np.ndarray:
         """
-        Chuyển metrics thật → obs vector 30-dim cho model env v3.
+        Chuyển metrics thật → obs vector 27-dim cho model env v3.
 
         Format:
         [
@@ -518,7 +514,7 @@ class RealClusterObserver:
           ...
           cpu_util_4, mem_util_4, cpu_capacity_norm_4, mem_capacity_norm_4,
           service_cpu_norm, service_mem_norm,
-          onehot_service_0, ..., onehot_service_7
+          onehot_service_0, ..., onehot_service_4
         ]
         """
         obs = []
@@ -1039,7 +1035,6 @@ class RealK8sScheduler:
                 "node_id"     : node_id,
                 "node_name"   : node_name,
                 "actual_node" : placement_map.get(service.name, ""),
-                "fallback_used" : fallback_used,
                 "success"     : success,
             })
 
@@ -1050,16 +1045,9 @@ class RealK8sScheduler:
         self._print_summary(results)
 
         if placement_map:
-            cost_summary = self._print_post_placement_weighted_cost(placement_map)
+            self._print_post_placement_weighted_cost(placement_map)
         else:
             print("\n  ⚠️  Không có placement thành công, bỏ qua weighted cost.")
-            cost_summary = self._empty_cost_summary()
-
-        self._append_deployment_summary_log(
-            results=results,
-            placement_map=placement_map,
-            cost_summary=cost_summary,
-        )
 
         return results
 
@@ -1170,24 +1158,7 @@ class RealK8sScheduler:
             return 0.5
         return 2.0
     
-    def _empty_cost_summary(self) -> dict:
-        """Summary rỗng dùng khi không có placement thành công."""
-        return {
-            "valid_edges": 0,
-            "total_edges": len(DEMO_DEPENDENCIES),
-            "same_node_edges": 0,
-            "cross_node_edges": 0,
-            "total_traffic_weight": sum(
-                e.traffic_weight for e in DEMO_DEPENDENCIES
-            ),
-            "same_node_traffic_weight": 0.0,
-            "cross_node_traffic_weight": 0.0,
-            "weighted_colocation_rate": 0.0,
-            "total_weighted_cost": 0.0,
-        }
-
-
-    def _print_post_placement_weighted_cost(self, placement_map: dict) -> dict:
+    def _print_post_placement_weighted_cost(self, placement_map: dict) -> None:
         """
         Tính post-placement weighted cost dựa trên dependency graph demo.
 
@@ -1196,8 +1167,6 @@ class RealK8sScheduler:
 
         Đây không phải latency thật, mà là logical placement cost
         để biểu diễn service-chain dependency sau khi deploy lên GKE.
-
-        Trả về cost_summary để ghi vào real_deployment_summary.csv.
         """
         print("\n" + "=" * 70)
         print("POST-PLACEMENT WEIGHTED SERVICE-CHAIN COST")
@@ -1205,13 +1174,6 @@ class RealK8sScheduler:
 
         total_cost = 0.0
         valid_edges = 0
-        same_node_edges = 0
-        cross_node_edges = 0
-        same_node_traffic_weight = 0.0
-        cross_node_traffic_weight = 0.0
-        total_traffic_weight = sum(
-            edge.traffic_weight for edge in DEMO_DEPENDENCIES
-        )
 
         print(
             f"{'Edge':<28} {'Weight':>8} {'Src Node':<18} "
@@ -1231,15 +1193,6 @@ class RealK8sScheduler:
             src_node = placement_map[edge.src]
             dst_node = placement_map[edge.dst]
 
-            same_node = src_node == dst_node
-
-            if same_node:
-                same_node_edges += 1
-                same_node_traffic_weight += edge.traffic_weight
-            else:
-                cross_node_edges += 1
-                cross_node_traffic_weight += edge.traffic_weight
-
             distance_cost = self._node_distance_cost(src_node, dst_node)
             edge_cost = edge.traffic_weight * distance_cost
 
@@ -1256,34 +1209,10 @@ class RealK8sScheduler:
                 f"{edge_cost:>8.2f}"
             )
 
-        weighted_colocation_rate = (
-            same_node_traffic_weight / total_traffic_weight
-            if total_traffic_weight > 0
-            else 0.0
-        )
-
         print("-" * 70)
-        print(f"Valid dependency edges    : {valid_edges}/{len(DEMO_DEPENDENCIES)}")
-        print(f"Same-node edges           : {same_node_edges}")
-        print(f"Cross-node edges          : {cross_node_edges}")
-        print(f"Total traffic weight      : {total_traffic_weight:.3f}")
-        print(f"Same-node traffic weight  : {same_node_traffic_weight:.3f}")
-        print(f"Cross-node traffic weight : {cross_node_traffic_weight:.3f}")
-        print(f"Weighted co-location rate : {weighted_colocation_rate*100:.1f}%")
-        print(f"Total weighted cost       : {total_cost:.3f}")
+        print(f"Valid dependency edges : {valid_edges}/{len(DEMO_DEPENDENCIES)}")
+        print(f"Total weighted cost    : {total_cost:.2f}")
         print("=" * 70)
-
-        cost_summary = {
-            "valid_edges": valid_edges,
-            "total_edges": len(DEMO_DEPENDENCIES),
-            "same_node_edges": same_node_edges,
-            "cross_node_edges": cross_node_edges,
-            "total_traffic_weight": total_traffic_weight,
-            "same_node_traffic_weight": same_node_traffic_weight,
-            "cross_node_traffic_weight": cross_node_traffic_weight,
-            "weighted_colocation_rate": weighted_colocation_rate,
-            "total_weighted_cost": total_cost,
-        }
 
         self._append_weighted_cost_log(
             placement_map=placement_map,
@@ -1291,7 +1220,7 @@ class RealK8sScheduler:
             valid_edges=valid_edges,
         )
 
-        return cost_summary
+        return total_cost
 
     def _append_service_log(self, row: dict) -> None:
         """
@@ -1391,139 +1320,6 @@ class RealK8sScheduler:
                     "valid_edges": valid_edges,
                     "total_cost": total_cost,
                 })
-
-    def _append_deployment_summary_log(
-        self,
-        results: list,
-        placement_map: dict,
-        cost_summary: dict,
-        ) -> None:
-        """
-        Ghi summary một dòng cho mỗi lần chạy real/dry-run.
-
-        File này dùng để đưa nhanh vào báo cáo:
-        - placement success
-        - Pod Ready/success rate
-        - fallback count
-        - dependency weighted cost
-        - same-node / cross-node edge statistics
-        """
-        total_services = len(results)
-        successful_services = sum(1 for r in results if r.get("success"))
-        failed_services = total_services - successful_services
-        fallback_count = sum(1 for r in results if r.get("fallback_used"))
-
-        placement_success_rate = (
-            successful_services / total_services
-            if total_services > 0
-            else 0.0
-        )
-
-        # Trong live-run, success=True chỉ khi Pod object apply OK và Pod Ready.
-        # Trong dry-run, success=True nghĩa là placement giả lập thành công.
-        pod_ready_rate = placement_success_rate
-
-        used_nodes = sorted(set(
-            r.get("actual_node") or r.get("node_name")
-            for r in results
-            if r.get("success") and (r.get("actual_node") or r.get("node_name"))
-        ))
-
-        row = {
-            "run_id": self.run_id,
-            "timestamp": datetime.now().isoformat(timespec="seconds"),
-            "mode": "dry_run" if self.dry_run else "live",
-            "namespace": K8S_NAMESPACE,
-            "model_path": self.model_path,
-            "num_nodes": NUM_NODES,
-            "num_services": total_services,
-            "scheduled_success": successful_services,
-            "scheduled_failed": failed_services,
-            "placement_success_rate": placement_success_rate,
-            "pod_ready_rate": pod_ready_rate,
-            "fallback_count": fallback_count,
-            "used_nodes_count": len(used_nodes),
-            "used_nodes": ";".join(used_nodes),
-            "valid_edges": cost_summary.get("valid_edges", 0),
-            "total_edges": cost_summary.get(
-                "total_edges",
-                len(DEMO_DEPENDENCIES),
-            ),
-            "same_node_edges": cost_summary.get("same_node_edges", 0),
-            "cross_node_edges": cost_summary.get("cross_node_edges", 0),
-            "total_traffic_weight": cost_summary.get(
-                "total_traffic_weight",
-                0.0,
-            ),
-            "same_node_traffic_weight": cost_summary.get(
-                "same_node_traffic_weight",
-                0.0,
-            ),
-            "cross_node_traffic_weight": cost_summary.get(
-                "cross_node_traffic_weight",
-                0.0,
-            ),
-            "weighted_colocation_rate": cost_summary.get(
-                "weighted_colocation_rate",
-                0.0,
-            ),
-            "total_weighted_cost": cost_summary.get(
-                "total_weighted_cost",
-                0.0,
-            ),
-        }
-
-        fieldnames = [
-            "run_id",
-            "timestamp",
-            "mode",
-            "namespace",
-            "model_path",
-            "num_nodes",
-            "num_services",
-            "scheduled_success",
-            "scheduled_failed",
-            "placement_success_rate",
-            "pod_ready_rate",
-            "fallback_count",
-            "used_nodes_count",
-            "used_nodes",
-            "valid_edges",
-            "total_edges",
-            "same_node_edges",
-            "cross_node_edges",
-            "total_traffic_weight",
-            "same_node_traffic_weight",
-            "cross_node_traffic_weight",
-            "weighted_colocation_rate",
-            "total_weighted_cost",
-        ]
-
-        file_exists = os.path.exists(REAL_SUMMARY_LOG_CSV)
-
-        with open(REAL_SUMMARY_LOG_CSV, "a", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(f, fieldnames=fieldnames)
-
-            if not file_exists:
-                writer.writeheader()
-
-            writer.writerow(row)
-
-        print("\n" + "=" * 70)
-        print("REAL DEPLOYMENT SUMMARY")
-        print("=" * 70)
-        print(f"Output summary CSV       : {REAL_SUMMARY_LOG_CSV}")
-        print(f"Scheduled success        : {successful_services}/{total_services}")
-        print(f"Placement success rate   : {placement_success_rate*100:.1f}%")
-        print(f"Pod Ready rate           : {pod_ready_rate*100:.1f}%")
-        print(f"Fallback count           : {fallback_count}")
-        print(f"Used nodes               : {len(used_nodes)}")
-        print(f"Valid dependency edges   : {row['valid_edges']}/{row['total_edges']}")
-        print(f"Same-node edges          : {row['same_node_edges']}")
-        print(f"Cross-node edges         : {row['cross_node_edges']}")
-        print(f"Weighted co-location     : {row['weighted_colocation_rate']*100:.1f}%")
-        print(f"Total weighted cost      : {row['total_weighted_cost']:.3f}")
-        print("=" * 70)
 # ═════════════════════════════════════════════════════════════════════════════
 # CLI
 # ═════════════════════════════════════════════════════════════════════════════
@@ -1533,10 +1329,10 @@ def parse_args():
         description="Real K8s Scheduler dùng DRL agent"
     )
     parser.add_argument("--model",    type=str,
-                        default="./experiment_5n8s_300k/models/dqn_model",
+                        default="./models/dqn_model",
                         help="Path đến model (không cần .zip)")
-    parser.add_argument("--services", type=int, default=8,
-                        help="Số services trong chain (default: 8)")
+    parser.add_argument("--services", type=int, default=5,
+                        help="Số services trong chain (default: 5)")
     parser.add_argument("--seed",     type=int, default=42)
     parser.add_argument("--dry-run",  action="store_true",
                         help="Chạy thử, không deploy thật")
@@ -1560,14 +1356,11 @@ if __name__ == "__main__":
     np.random.seed(args.seed)
     services = []
     demo_services = [
-        ServiceRequest("frontend",       0.03, 128),
-        ServiceRequest("auth",           0.03, 128),
-        ServiceRequest("catalog",        0.04, 192),
-        ServiceRequest("cart",           0.04, 192),
-        ServiceRequest("recommendation", 0.05, 256),
-        ServiceRequest("payment",        0.04, 192),
-        ServiceRequest("shipping",       0.03, 128),
-        ServiceRequest("database",       0.06, 256),
+        ServiceRequest("frontend", 0.03, 128),
+        ServiceRequest("auth",     0.03, 128),
+        ServiceRequest("catalog",  0.04, 192),
+        ServiceRequest("payment",  0.03, 192),
+        ServiceRequest("database", 0.05, 256),
     ]
 
     services = demo_services[:args.services]
